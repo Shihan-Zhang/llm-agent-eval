@@ -88,7 +88,7 @@ def main():
             options = {**FC_OPTIONS, **cfg["sampling"], "seed": run * 100 + i}
             row = {"config": cfg["name"], "model": cfg["model"], "think": cfg["think"], "id": it["id"],
                    "category": it["category"], "run": run, "options": options,
-                   "run_id": run_id, "base_url": DEFAULT_BASE_URL, "ollama_version": ollama_version}  # 数据血缘
+                   "run_id": run_id, "base_url": DEFAULT_BASE_URL, "ollama_version": ollama_version}  # 版本记录:每行能追溯到哪次运行
             t0 = time.time()
             try:
                 data = chat(cfg["model"], cfg["think"], options, it["messages"], it["tools"])
