@@ -26,7 +26,7 @@ patch:
     rpm: 1000                          # 每分钟 1,000 次请求
     headroom: 0.9                      # 只用 90%
     chars_per_token: 2.5               # 输入估算的保守初值,运行中用实际 prompt_tokens 校准
-    output_ratio: 0.05                 # 输出 ≈ max_tokens × 该比例;试跑后按实测更新
+    output_ratio: 0.01                 # 输出 ≈ max_tokens × 该比例;试跑实测每次调用约 72 token(16000 × 0.0045),取 0.01 留余量
 
 e2:
   registry: gold                       # contracts.py build --source gold 的产物
