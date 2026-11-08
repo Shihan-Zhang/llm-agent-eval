@@ -1,0 +1,42 @@
+# E2 主分析:Qwen3.5-35B-A3B(硅基流动),按 Outcome Monitors 论文设置:温度 0、关闭思考
+# (不同于 E1-API 试跑的温度 1、开思考)。用法见 eval/agent_error/run_e2.py 与 scripts/run_e2_pilot.bat。
+
+agent:
+  type: "openai"
+  model: "Qwen/Qwen3.5-35B-A3B"
+  base_url: "${SILICONFLOW_BASE_URL}"
+  api_key: "${SILICONFLOW_API_KEY}"
+  temperature: 0
+  max_tokens: 16000                    # ToolMaze 论文设置;关闭思考后实际输出远小于此
+  extra_body:
+    enable_thinking: false
+
+execution:
+  max_rounds: 25                       # ToolMaze 论文:最多 25 步
+
+data:
+  tools_dir: "tools"                   # 相对 ToolMaze 目录
+  template_dir: "data/templates"
+
+patch:
+  request_timeout_s: 300
+  retry: {max_attempts: 8, base_s: 5, cap_s: 120}          # 429 / 超时 / 连接 / 5xx 指数退避加抖动
+  rate_limit:
+    tpm: 40000                         # 硅基流动 L0:每分钟 4 万 token
+    rpm: 1000                          # 每分钟 1,000 次请求
+    headroom: 0.9                      # 只用 90%
+    chars_per_token: 2.5               # 输入估算的保守初值,运行中用实际 prompt_tokens 校准
+    output_ratio: 0.05                 # 输出 ≈ max_tokens × 该比例;试跑后按实测更新
+
+e2:
+  registry: gold                       # contracts.py build --source gold 的产物
+  seed: 20261108                       # 配对顺序与组内先后;pilot 抽题用 seed + 1
+  workers: 4
+  max_pair_attempts: 3
+  price_usd_per_m: {input: 0.24, output: 1.80}   # 与 cost_report.py 相同(硅基流动官方博客价)
+  results_dir: "../../../external/agent_error/results/e2/api"
+  runs:
+    main:     {episodes: main,  arms: {baseline: off, full: full}}       # ① 80 对,先跑这个
+    p0:       {episodes: p0,    arms: {baseline: off, full: full}}       # ③ 同 80 题的 P0:回执会不会伤害无故障表现(暂不运行)
+    stripped: {episodes: main,  arms: {full: full, stripped: stripped}}  # ② 去掉备用工具列表的对照(暂不运行)
+    pilot:    {episodes: pilot, n: 5, arms: {baseline: off, full: full}} # 清单之外 5 题,测 token 与耗时

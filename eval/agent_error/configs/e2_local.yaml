@@ -1,0 +1,33 @@
+# E2 补充:本地 qwen3i-8k(Ollama,num_ctx 固定 8192),温度 0。先试跑 5 题测输入 token 数;
+# 输入 + max_tokens 超过 8192 时 Ollama 静默截断,8k 不够就只跑 C1(runs.c1)。
+
+agent:
+  type: "vllm"                         # OpenAI 兼容接口
+  model: "qwen3i-8k"
+  base_url: "http://localhost:11434/v1"
+  api_key: "ollama"
+  temperature: 0
+  max_tokens: 2048                     # 与 E1 相同
+
+execution:
+  max_rounds: 25
+
+data:
+  tools_dir: "tools"
+  template_dir: "data/templates"
+
+patch:
+  request_timeout_s: 600
+  retry: {max_attempts: 3, base_s: 5, cap_s: 30}           # 本地只防偶发连接错误;不限速
+
+e2:
+  registry: gold
+  seed: 20261108
+  workers: 1                           # Ollama 串行处理
+  max_pair_attempts: 2
+  num_ctx: 8192
+  results_dir: "../../../external/agent_error/results/e2/local"
+  runs:
+    pilot: {episodes: pilot, n: 5, arms: {baseline: off, full: full}}
+    main:  {episodes: main,  arms: {baseline: off, full: full}}          # 仅当试跑显示 8k 够用
+    c1:    {episodes: c1,    arms: {baseline: off, full: full}}          # 8k 不够时的替代
