@@ -71,6 +71,33 @@ def test_p0_outcomes_are_clean_steps():
     assert [(o.tool, o.faulty) for o in outs] == [("a", False), ("b", False)]
 
 
+def _row(task, faulty, props_=()):
+    v = tuple(C.Violation(p, "x", None, None, "") for p in props_)
+    return A.Row(_outcome(task, {}, faulty), 0, True, v, ("quote",))
+
+
+def test_cluster_bootstrap_resamples_whole_tasks():
+    """题 A 有 10 个故障全被标记,题 B 有 1 个未被标记:按题重抽时比率只能是 0、10/11 或 1。"""
+    rows = [_row("A", True, ("nonpositive_value",)) for _ in range(10)] + [_row("B", True)]
+    lo, hi = A.cluster_ci(rows, faulty=True, b=2000)
+    assert {round(lo, 6), round(hi, 6)} <= {0.0, round(10 / 11, 6), 1.0}
+    assert A.cluster_ci(rows, True, b=2000) == A.cluster_ci(rows, True, b=2000)      # 固定种子可复现
+    assert A.cluster_ci(rows, faulty=False) is None
+
+
+def test_cluster_bootstrap_degenerate_when_all_tasks_equal():
+    rows = [_row(t, True, ("nonpositive_value",)) for t in "ABC"] + [_row(t, True) for t in "ABC"]
+    assert A.cluster_ci(rows, True, b=500) == (0.5, 0.5)
+
+
+def test_paper_five_classes_exclude_the_extra_four():
+    assert set(A.PAPER5).isdisjoint(A.EXTRA) and len(A.PAPER5 + A.EXTRA) == 9
+    r_extra = _row("A", True, ("learned_type_mismatch",))
+    r_p5 = _row("A", True, ("learned_type_mismatch", "unseen_category"))
+    assert r_extra.flagged and not r_extra.flagged_by(A.PAPER5)
+    assert r_p5.flagged_by(A.PAPER5)
+
+
 def test_stats_definitions():
     def row(faulty, flagged, covered=True, n_rec=1):
         v = (C.Violation("nonpositive_value", "p", "> 0", -1, ""),) if flagged else ()

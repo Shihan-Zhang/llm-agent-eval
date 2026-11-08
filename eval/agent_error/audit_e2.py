@@ -8,6 +8,10 @@ C3/C4 上召回率 79.6%、干净误报率 1.39%、契约覆盖率 94.2%;§5 中
 - 干净结果:C3/C4 的 P0 题目文件中的步骤(同样去重)。
 - 第 k 折的题只用注册表 C_k 检查(contracts.registry_for;C_k 没见过这些题)。
 - 覆盖:C_k 里有该工具的契约。召回:检查器至少报出一条违反。
+- 区间:Wilson(把每个结果当独立样本)与按题聚类的百分位 bootstrap(按 task_id 有放回重抽 10,000 次,种子固定;
+  同一道题的 P0/P3/P4 结果一起进出)。后者考虑了同题结果之间的相关性,是主要区间。
+- 论文 5 类口径:只计 echo、positivity、domain、affine、order 五类不变量的违反,与论文 79.6% 可比;
+  另外 4 类(类型、必有字段、多出字段、显式错误)单独列出独有贡献。
 - 可选工具 ≥ 2:回执的 admissible_recovery_tools(出错工具 + 本题可见的备用工具)长度 ≥ 2。
   可见工具照搬上游 ExecutionEngine._get_c2_merged_trace:所有路径执行轨迹里工具名的并集(C1 为 execution_trace)。
 
@@ -23,7 +27,9 @@ import os
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
+
+import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -37,6 +43,12 @@ DEFS = os.path.join(C.TM, "tools", "definitions")
 OUT = os.path.join(ROOT, "eval", "results", "e2_audit.md")
 TIERS = ("c3", "c4")
 PAPER = {"recall": 0.796, "fp": 0.0139, "coverage": 0.942, "ge2": 0.915}
+BOOT_B = 10_000
+BOOT_SEED = 20261108
+# 论文算法 2 挖掘的 5 类不变量对应的违反代码;其余 4 类(必有字段、多出字段、显式错误、类型)单独列出贡献
+PAPER5 = ("learned_echo_mismatch", "nonpositive_value", "unseen_category", "affine_relation_broken",
+          "temporal_order_violated")
+EXTRA = ("learned_type_mismatch", "missing_learned_field", "unexpected_field", "explicit_error")
 
 
 @dataclass(frozen=True)
@@ -63,6 +75,10 @@ class Row:
     @property
     def flagged(self) -> bool:
         return bool(self.violations)
+
+    def flagged_by(self, classes: Iterable[str]) -> bool:
+        cs = set(classes)
+        return any(v.property in cs for v in self.violations)
 
 
 def _traces(task: dict) -> list[list[dict]]:
@@ -125,6 +141,31 @@ def rate(k: int, n: int) -> str:
     return f"{k}/{n} = {k / n:.1%} [{lo:.1%}, {hi:.1%}]"
 
 
+def cluster_ci(rows: list[Row], faulty: bool, flag: Callable[[Row], bool] = lambda r: r.flagged,
+               b: int = BOOT_B, seed: int = BOOT_SEED) -> tuple[float, float] | None:
+    """按题(task_id)聚类的百分位 bootstrap 95% 区间:每次有放回地重抽题目,比率 = 标记数之和 / 结果数之和。"""
+    k: dict[str, int] = defaultdict(int)
+    n: dict[str, int] = defaultdict(int)
+    for r in rows:
+        if r.outcome.faulty == faulty:
+            n[r.outcome.task_id] += 1
+            k[r.outcome.task_id] += flag(r)
+    tasks = sorted(n)
+    if not tasks:
+        return None
+    kk = np.array([k[t] for t in tasks], dtype=float)
+    nn = np.array([n[t] for t in tasks], dtype=float)
+    idx = np.random.default_rng(seed).integers(0, len(tasks), size=(b, len(tasks)))
+    ratios = kk[idx].sum(axis=1) / nn[idx].sum(axis=1)
+    lo, hi = np.percentile(ratios, [2.5, 97.5])
+    return float(lo), float(hi)
+
+
+def boot(rows: list[Row], faulty: bool, flag: Callable[[Row], bool] = lambda r: r.flagged) -> str:
+    ci = cluster_ci(rows, faulty, flag)
+    return "—" if ci is None else f"[{ci[0]:.1%}, {ci[1]:.1%}]"
+
+
 def stats(rows: list[Row]) -> dict:
     faults = [r for r in rows if r.outcome.faulty]
     clean = [r for r in rows if not r.outcome.faulty]
@@ -135,31 +176,63 @@ def stats(rows: list[Row]) -> dict:
             "n_flag_fault": len(flagged_faults), "ge2": sum(len(r.recovery) >= 2 for r in flagged_faults)}
 
 
+def class_section(rows: list[Row]) -> list[str]:
+    """论文 5 类(与 79.6% 同口径)vs 全部类别,以及另外 4 类各自的贡献。"""
+    faults = [r for r in rows if r.outcome.faulty]
+    clean = [r for r in rows if not r.outcome.faulty]
+
+    def by(cls):
+        return lambda r: r.flagged_by(cls)
+
+    p5 = by(PAPER5)
+    lines = ["**只用论文 5 类不变量(echo、positivity、domain、affine、order)**——与论文 79.6% 同口径", "",
+             "| 检测范围 | 召回率 | 召回率 bootstrap | 误报率 | 误报率 bootstrap |", "|---|---|---|---|---|",
+             f"| 论文 5 类 | {rate(sum(map(p5, faults)), len(faults))} | {boot(rows, True, p5)} | "
+             f"{rate(sum(map(p5, clean)), len(clean))} | {boot(rows, False, p5)} |",
+             f"| 全部 9 个代码 | {rate(sum(r.flagged for r in faults), len(faults))} | {boot(rows, True)} | "
+             f"{rate(sum(r.flagged for r in clean), len(clean))} | {boot(rows, False)} |", "",
+             "另外 4 类的贡献:\"独有\"= 该类触发而论文 5 类都没触发;\"5 类 + 该类\"= 加入该类后的召回率/误报率。", "",
+             "| 类别 | 独有的故障检出 | 独有的误报 | 5 类 + 该类 召回率 | 5 类 + 该类 误报率 |", "|---|---|---|---|---|"]
+    for cls in EXTRA:
+        only = lambda r, c=cls: r.flagged_by((c,)) and not p5(r)
+        plus = by(PAPER5 + (cls,))
+        lines.append(f"| {cls} | {sum(map(only, faults))} | {sum(map(only, clean))} | "
+                     f"{rate(sum(map(plus, faults)), len(faults))} | {rate(sum(map(plus, clean)), len(clean))} |")
+    return lines + [""]
+
+
 def section(name: str, rows: list[Row], k: int) -> list[str]:
     s = stats(rows)
     lines = [f"## 注册表来源:{name}", "",
-             "| 指标 | 本次 | 论文 |", "|---|---|---|",
-             f"| 召回率(故障结果被标记) | {rate(s['recall'], s['n_fault'])} | 79.6% |",
-             f"| 干净误报率(P0 结果被标记) | {rate(s['fp'], s['n_clean'])} | 1.39% |",
-             f"| 契约覆盖率(故障结果的工具在 C_k 中有契约) | {rate(s['covered'], s['n_fault'])} | 94.2% |",
-             f"| 有契约时的召回率 | {rate(s['recall_covered'], s['covered'])} | — |",
-             f"| 被标记的故障中,回执可选工具 ≥ 2 个 | {rate(s['ge2'], s['n_flag_fault'])} | 91.5%(运行中 484 次回执) |",
-             "", "**按折**(审计第 k 折只用 C_k)", "",
-             "| 折 | 故障结果 | 召回率 | 干净结果 | 误报率 | 覆盖率 |", "|---|---|---|---|---|---|"]
+             "| 指标 | 本次 [95% Wilson] | 按题聚类 bootstrap 95% | 论文 |", "|---|---|---|---|",
+             f"| 召回率(故障结果被标记) | {rate(s['recall'], s['n_fault'])} | {boot(rows, True)} | 79.6% |",
+             f"| 干净误报率(P0 结果被标记) | {rate(s['fp'], s['n_clean'])} | {boot(rows, False)} | 1.39% |",
+             f"| 契约覆盖率(故障结果的工具在 C_k 中有契约) | {rate(s['covered'], s['n_fault'])} | "
+             f"{boot(rows, True, lambda r: r.covered)} | 94.2% |",
+             f"| 有契约时的召回率 | {rate(s['recall_covered'], s['covered'])} | — | — |",
+             f"| 被标记的故障中,回执可选工具 ≥ 2 个 | {rate(s['ge2'], s['n_flag_fault'])} | — | 91.5%(运行中 484 次回执) |",
+             ""]
+    lines += class_section(rows)
+    lines += ["**按折**(审计第 k 折只用 C_k;括号外为 Wilson,bootstrap 为按题聚类)", "",
+              "| 折 | 故障结果 | 召回率 | 召回率 bootstrap | 干净结果 | 误报率 | 误报率 bootstrap | 覆盖率 |",
+              "|---|---|---|---|---|---|---|---|"]
     for fold in range(k):
-        f = stats([r for r in rows if r.fold == fold])
-        lines.append(f"| {fold} | {f['n_fault']} | {rate(f['recall'], f['n_fault'])} | {f['n_clean']} | "
-                     f"{rate(f['fp'], f['n_clean'])} | {rate(f['covered'], f['n_fault'])} |")
+        fr = [r for r in rows if r.fold == fold]
+        f = stats(fr)
+        lines.append(f"| {fold} | {f['n_fault']} | {rate(f['recall'], f['n_fault'])} | {boot(fr, True)} | {f['n_clean']} | "
+                     f"{rate(f['fp'], f['n_clean'])} | {boot(fr, False)} | {rate(f['covered'], f['n_fault'])} |")
     lines += ["", "**按层级与模式**", "",
-              "| 层级 | 模式 | 故障结果 | 召回率 | 覆盖率 | 可选工具 ≥ 2 |", "|---|---|---|---|---|---|"]
+              "| 层级 | 模式 | 故障结果 | 召回率 | 召回率 bootstrap | 覆盖率 | 可选工具 ≥ 2 |", "|---|---|---|---|---|---|---|"]
     for tier in TIERS:
         for mode in ("P3", "P4"):
-            f = stats([r for r in rows if r.outcome.tier == tier and r.outcome.mode == mode])
-            lines.append(f"| {tier.upper()} | {mode} | {f['n_fault']} | {rate(f['recall'], f['n_fault'])} | "
+            fr = [r for r in rows if r.outcome.tier == tier and r.outcome.mode == mode]
+            f = stats(fr)
+            lines.append(f"| {tier.upper()} | {mode} | {f['n_fault']} | {rate(f['recall'], f['n_fault'])} | {boot(fr, True)} | "
                          f"{rate(f['covered'], f['n_fault'])} | {rate(f['ge2'], f['n_flag_fault'])} |")
-        c = stats([r for r in rows if r.outcome.tier == tier])
-        lines.append(f"| {tier.upper()} | 合计 | {c['n_fault']} | {rate(c['recall'], c['n_fault'])} | "
-                     f"{rate(c['covered'], c['n_fault'])} | 误报 {rate(c['fp'], c['n_clean'])} |")
+        tr = [r for r in rows if r.outcome.tier == tier]
+        c = stats(tr)
+        lines.append(f"| {tier.upper()} | 合计 | {c['n_fault']} | {rate(c['recall'], c['n_fault'])} | {boot(tr, True)} | "
+                     f"{rate(c['covered'], c['n_fault'])} | 误报 {rate(c['fp'], c['n_clean'])},bootstrap {boot(tr, False)} |")
 
     faults = [r for r in rows if r.outcome.faulty]
     fires, first = Counter(), Counter()
@@ -198,7 +271,7 @@ def main() -> None:
     subs = R.build_subs(DEFS)
     lines = ["# E2 阶段 3:离线检测审计(由 eval/agent_error/audit_e2.py 生成,勿手改)", "",
              f"规格哈希 {C.SPEC_SHA256[:12]};范围 C3/C4 × P0(干净)/ P3、P4(故障);按工具结果计,不按回合。"
-             "区间为 95% Wilson。", ""]
+             f"区间为 95% Wilson,以及按题聚类的百分位 bootstrap(按 task_id 重抽 {BOOT_B:,} 次,种子 {BOOT_SEED})。", ""]
     for src in a.sources:
         regs, folds = C.load(os.path.join(C.OUT, src))
         with open(os.path.join(C.OUT, src, "build_info.json"), encoding="utf-8") as fh:
