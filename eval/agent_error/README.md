@@ -62,3 +62,43 @@ scripts\run_e1.bat        E1:官方设置复现 C1,100 题 × P0–P4(日志 ext
 主要比较(事先指定):隐式 vs 显式,配对 200 对,59 : 0,精确 McNemar p ≈ 3.5 × 10⁻¹⁸;PRR 相对下降 75%(论文报告约 37%)。
 4B 模型的两种失败:显式错误一律放弃(P1),隐式错误一律信任(P3);另有 22 个回合声称重试过但其实没有。
 总耗时 68.6 分钟。详细对照与局限见 `eval/results/predictions.md`。
+
+## E2:复现 Outcome Monitors(arXiv 2608.19303)——冻结的规格
+
+运行时检查工具结果,违反从 P0 轨迹挖出的"结果契约"时,在原结果外附一张回执(违反的规则、期望值、实际值、
+可用的备用工具),不改动作空间。代码:`contracts.py`(挖掘与检查)、`e2_manifest.py`(回合清单)。
+
+以下内容**在看到任何 E2 结果之前定下,之后不改**;`tests/test_contracts.py` 校验代码中的规格与这里的哈希一致。
+
+**契约数据**:主分析用题目自带的标准 P0 轨迹(C1–C4 共 400 道题;论文附录 P 也是 400 个 nominal 工作流),
+敏感性分析用 E1 本地 qwen3i-8k 的 C1 P0 轨迹(100 题)。只读 P0;不读任务描述、扰动字段、判分结果。
+5 折按 `task_id` 划分(种子 20261108,400 道题各有独立模板,构建时断言模板不跨折);评测第 k 折的题只用注册表 C_k。
+
+**样本数门槛**(论文算法 2 原文):echo ≥ 2 对且全部相等;positivity ≥ 3 个数值样本且全部 > 0;
+domain ≥ 4 个字符串样本、规范化(去首尾空格、小写)后 ≤ 8 个不同值;affine ≥ 4 个样本、各 ≥ 3 个不同值,
+拟合容差 1e-8,运行时 1e-5;order ≥ 2 个可解析样本且全部 f ≤ g。
+
+**论文未公开、由我们定义的部分**:
+
+| 项 | 取值 | 依据 |
+|---|---|---|
+| 分类词表(字段名最后一段命中即算) | action, availability, category, channel, class, condition, currency, department, direction, exchange, kind, level, method, mode, priority, rating, severity, state, status, strategy, tier, trend, type, unit | 盘点 P0 输出的字段名(只看名字、类型、取值个数,不看 P1–P4 与结果),取"状态/类别"语义的词,排除编号、名称、文本 |
+| 三组日期对(f ≤ g) | check_in_date ≤ check_out_date;start_time ≤ end_time;meeting_start_time ≤ meeting_end_time | 同一输出中共现次数 215 / 32 / 16,且语义为"开始 ≤ 结束";可解析 ISO 日期、日期时间、HH:MM,同种类才比较 |
+| 工具最少样本 | 2(少于 2 个样本的工具不建契约) | 论文未写;1 个样本时"全部字段都必有"过于激进 |
+| 类型约束最少样本 | 2;整数可通过"数值"类型 | 论文未写 |
+| explicit_error 字段名 | error, error_message, errors, exception(非空且不在该工具的正常字段中) | 论文附录 N 的触发实例为 `error` |
+| order 违反的代码名 | temporal_order_violated | 论文未给 |
+
+**哈希**
+
+- 规格(`contracts.SPEC` 的规范 JSON):`SPEC_SHA256: c3297b2d6cf518fdbeace262b11c53b748145f301fb646f639c019e7ad86e453`
+- 回合清单 `configs/e2_manifest.json`(主实验 C3/P3、C3/P4、C4/P3、C4/P4 各 20 个、共 80 个互不相同的任务,种子 20261108;
+  补充 C1 全部 100 题 × P3/P4):`MANIFEST_SHA256: 8d43264736a91674342f3a828a9fe9d511df8b2314b7e48af6d31be38916936d`
+
+注册表构建(标准轨迹,2026-11-08,仓库 56d80cf):3,734 个去重样本、400 个工作流,5 份注册表合计 16,720 条不变量
+(论文 15,041 条,计数口径含必有字段与类型约束)。E1 来源:498 个样本、100 个工作流、6,177 条。
+
+```
+python eval/agent_error/contracts.py build --source gold   # → external/agent_error/results/e2/contracts/gold/
+python eval/agent_error/contracts.py build --source e1     # → .../contracts/e1/
+```
