@@ -86,7 +86,7 @@ def rate(k: int, n: int) -> str:
     if n == 0:
         return "—"
     lo, hi = wilson(k, n)
-    return f"{k}/{n} = {k / n:.1%} [{lo:.1%}, {hi:.1%}]"
+    return f"{k}/{n} = {k / n:.1%} [{max(0.0, lo):.1%}, {min(1.0, hi):.1%}]"   # 截掉浮点误差造成的 -0.0%
 
 
 def paired(rows: list[tuple[bool, bool]]) -> dict:
