@@ -299,6 +299,23 @@ def test_estimate_extrapolates_tokens_time_cost_and_context():
     assert est["prompt_budget"] == 6144 and est["fits_context"] is False
 
 
+@pytest.mark.parametrize("name", ["e2_api.yaml", "e2_local.yaml"])
+def test_real_configs_have_valid_arms_and_groups(name):
+    cfg = E.load_cfg(os.path.join(ROOT, "eval", "agent_error", "configs", name))
+    for run, spec in cfg["e2"]["runs"].items():
+        variants = {a: E.arm_variant(v) for a, v in spec["arms"].items()}
+        assert set(variants.values()) <= {None, "full", "stripped"}, run
+        assert spec["episodes"] in {"main", "p0", "c1", "pilot"}, run
+    assert {"main", "pilot"} <= set(cfg["e2"]["runs"])
+    assert cfg["agent"]["temperature"] == 0
+
+
+def test_arm_variant_accepts_yaml_false_and_rejects_unknown():
+    assert E.arm_variant(False) is None and E.arm_variant("off") is None and E.arm_variant("full") == "full"
+    with pytest.raises(ValueError):
+        E.arm_variant("always_warn")
+
+
 def test_latest_records_keeps_last_attempt():
     recs = [_rec("x", "full", 1, fail=1), _rec("x", "full", 2)]
     assert E.latest_records(recs) == [recs[1]]

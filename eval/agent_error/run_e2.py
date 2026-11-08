@@ -40,6 +40,15 @@ import toolmaze_run as T  # noqa: E402
 ARM_VARIANTS = {"off": None, "full": "full", "stripped": "stripped"}
 
 
+def arm_variant(value) -> str | None:
+    """YAML 会把未加引号的 off 解析成 False,两者都表示基线组。"""
+    if value is False:
+        return None
+    if value not in ARM_VARIANTS:
+        raise ValueError(f"未知的组设置 {value!r},只能是 {list(ARM_VARIANTS)}")
+    return ARM_VARIANTS[value]
+
+
 @dataclass(frozen=True)
 class Pair:
     tier: str
@@ -133,7 +142,7 @@ class Runner:
         self.cfg, self.run_name = cfg, run
         e2 = cfg["e2"]
         spec = e2["runs"][run]
-        self.arms: dict[str, str | None] = {a: ARM_VARIANTS[v] for a, v in spec["arms"].items()}
+        self.arms: dict[str, str | None] = {a: arm_variant(v) for a, v in spec["arms"].items()}
         self.out = T._abs(cfg_path, os.path.join(e2["results_dir"], run))
         os.makedirs(self.out, exist_ok=True)
         cfg.setdefault("patch", {})["call_log"] = os.path.join(self.out, "calls.jsonl")

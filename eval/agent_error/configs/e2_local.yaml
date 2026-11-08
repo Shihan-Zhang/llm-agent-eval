@@ -28,6 +28,6 @@ e2:
   num_ctx: 8192
   results_dir: "../../../external/agent_error/results/e2/local"
   runs:
-    pilot: {episodes: pilot, n: 5, arms: {baseline: off, full: full}}
-    main:  {episodes: main,  arms: {baseline: off, full: full}}          # 仅当试跑显示 8k 够用
-    c1:    {episodes: c1,    arms: {baseline: off, full: full}}          # 8k 不够时的替代
+    pilot: {episodes: pilot, n: 5, arms: {baseline: "off", full: full}}
+    main:  {episodes: main,  arms: {baseline: "off", full: full}}          # 仅当试跑显示 8k 够用
+    c1:    {episodes: c1,    arms: {baseline: "off", full: full}}          # 8k 不够时的替代
