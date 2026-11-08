@@ -145,5 +145,17 @@ C4/P3 中可选工具 ≥ 2 只有 64.7%:不足的 489 条都是 book_/build_/pl
 - 回执只改变模型看到的工具消息;判分读上游记录的原始结果。第 k 折的题只用注册表 C_k。
 
 ```
-scripts\run_e2_pilot.bat     试跑(API + 本地),日志 external\logs\e2_pilot.log
+scripts\run_e2_pilot.bat     试跑(API + 本地,清单之外 5 题 × 2 组),日志 external\logs\e2_pilot.log
+scripts\run_e2_main.bat      ① API 正式运行:清单 80 对,基线 vs 完整回执,日志 external\logs\e2_main.log
+scripts\run_e2_local.bat     本地 qwen3i-8k:同 80 对,日志 external\logs\e2_local.log
 ```
+
+试跑(2026-11-08,不计入结果):API 每回合输入约 6.1–6.9 万 token、调用约 15 次,150 次请求无重试、无 API 错误;
+外推 ① 约 1,044 万输入 token、约 4.9 小时(受每分钟 token 限额约束)、约 $2.83 以内(未计缓存折扣,试跑缓存命中 21.5%)。
+本地单次请求最大输入 4,900,低于预算 6,144,8k 够用;外推约 65 分钟。
+回执组的回执大多落在"工具返回错误"(模型传错参数,API 试跑 37/37 被标记),正常结果上的误报 API 3/30、本地 2/35,
+因此汇总把回执分成三类:注入的故障 / 工具返回错误 / 正常结果上的误报。
+
+汇总 `summarize_e2.py`(两个 .bat 跑完自动调用)→ `eval/results/e2_<api|local>_main_summary.md`:配对完成率与精确 McNemar、
+层级 × 模式分表、回执三分类的触发率与"可选工具 ≥ 2"占比、回执后的反应(重试原工具 / 换用备用工具 / 其他,
+全部配对与胜出配对分别按三类拆开)、胜出配对的标签、本地输入超出预算的回合。只统计冻结清单的 80 对。
