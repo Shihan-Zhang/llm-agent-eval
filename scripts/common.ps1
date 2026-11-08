@@ -18,8 +18,8 @@ $Py   = Join-Path $Ext "venv-bench\Scripts\python.exe"
 $Logs = Join-Path $Ext "logs"
 New-Item -ItemType Directory -Force $AE, $Logs | Out-Null
 function Step($name) { Write-Host "`n===== $name =====" }
-function Lineage {
-  # 数据血缘:两个仓库的提交、Ollama 版本、模型摘要、显卡状态
+function VersionInfo {
+  # 版本记录:两个仓库的提交、Ollama 版本、模型摘要、显卡状态,让结果能追溯到是哪次运行
   Write-Host "llm-agent-eval: $(git -C $Root rev-parse --short HEAD) ($(git -C $Root rev-parse --abbrev-ref HEAD))"
   Write-Host "ToolMaze:             $(git -C $TM rev-parse --short HEAD)"
   ollama --version

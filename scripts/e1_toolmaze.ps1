@@ -4,8 +4,8 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 Start-Transcript -Path (Join-Path $Logs "e1.log") -Append | Out-Null
 
-Step "1. 数据血缘"
-Lineage
+Step "1. 版本记录"
+VersionInfo
 $Cfg = Join-Path $Root "eval\agent_error\configs\toolmaze_e1.yaml"
 
 Step "2. 预热模型(避免首题计入约 15 s 的加载时间)"

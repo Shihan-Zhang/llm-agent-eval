@@ -10,7 +10,7 @@ $env:QDRANT_LOCAL_PATH = "D:\ZSH\cache\qdrant"
 $env:COLLECTION_NAME   = "notes"
 $env:PYTHONPATH        = $Root
 
-Step "1. 数据血缘"
+Step "1. 版本记录"
 Write-Host "repo: $(git -C $Root rev-parse --short HEAD) ($(git -C $Root rev-parse --abbrev-ref HEAD))   日期: $(Get-Date -Format s)"
 ollama --version
 ollama list | Select-String "bge-m3"

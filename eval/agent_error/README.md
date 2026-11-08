@@ -42,6 +42,7 @@ eval/agent_error/configs/          我们的运行配置
 ```
 scripts\run_e0.bat        E0:安装、下载数据、建模型变体、跑 5 道 P0 题(日志 external\logs\e0.log)
 scripts\run_e1.bat        E1:官方设置复现 C1,100 题 × P0–P4(日志 external\logs\e1.log,可中断后重跑续跑)
+python eval\agent_error\summarize_e1.py   从结果文件重算 Wilson 区间、主要比较、"声称重试"清单 → eval\results\e1_summary.md
 ```
 
 ## E0 结果(2026-11-05,管线检查)
@@ -61,4 +62,5 @@ scripts\run_e1.bat        E1:官方设置复现 C1,100 题 × P0–P4(日志 ext
 
 主要比较(事先指定):隐式 vs 显式,配对 200 对,59 : 0,精确 McNemar p ≈ 3.5 × 10⁻¹⁸;PRR 相对下降 75%(论文报告约 37%)。
 4B 模型的两种失败:显式错误一律放弃(P1),隐式错误一律信任(P3);另有 22 个回合声称重试过但其实没有。
-总耗时 68.6 分钟。详细对照与局限见 `eval/results/predictions.md`。
+总耗时 68.6 分钟。详细对照与局限见 `eval/results/predictions.md`;上表的区间、配对计数和 22 个回合的清单
+(P1 12、P2 9、P4 1)由 `summarize_e1.py` 生成,见 `eval/results/e1_summary.md`。
