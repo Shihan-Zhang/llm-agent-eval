@@ -6,14 +6,38 @@
 函数调用(BFCL)、中文 RAG 检索。重点不是"跑出一个分数",而是回答三个问题:
 
 1. **差异是真的吗?** 事先指定主要比较,配对检验 + 检验功效,"不显著"时说清楚能检出多大的差距;
-2. **判分是对的吗?** 标准答案自洽测试、操纵检查、数据血缘、基准源码审计;
+2. **判分是对的吗?** 标准答案自洽测试、操纵检查、运行版本记录、基准源码审计;
 3. **该怎么选?** 准确率按成本决策,并写明证据的边界。
+
+<details>
+<summary><b>English summary</b></summary>
+
+An evaluation platform for LLMs and agents. It reproduces public benchmarks (ToolMaze, BFCL, Chinese RAG retrieval)
+instead of building a private test set, and focuses on three questions: is a difference real (pre-registered primary
+comparison, paired exact tests, power analysis), is the grading right (grader self-consistency tests, manipulation
+checks, benchmark source audits, run version records), and which model to pick (accuracy weighed against cost).
+
+- **Agent fault recovery** (ToolMaze C1, 100 tasks × 5 fault modes, 500 trajectories, local Qwen3-4B-Instruct):
+  70% success without faults, **0% under implicit transient faults**; implicit vs explicit faults, paired **59 : 0**
+  (exact McNemar p ≈ 3.5 × 10⁻¹⁸). Two failure modes: it gives up on any explicit error and trusts any corrupted data;
+  22 final answers claim retries that never happened.
+- **Benchmark source audit:** 4 issues that change conclusions — different system prompts for the fault-free and
+  fault conditions, path-based rather than outcome-based grading, an LLM judge the public code never calls, and a
+  hard-coded 45 s request timeout that turns slow thinking-mode responses into recorded model failures.
+- **Function calling** (BFCL v4, 150 stratified tasks): 84.0% vs 79.3%, discordant 9 : 16, p = 0.23. 150 tasks can only
+  detect a gap of about 9.3 pp (about 520 tasks for 5 pp), so the choice is made on cost.
+- **Grader reliability:** 11 of the 17 failures in the first grading pass were grader errors; every defect class is now
+  a regression test.
+- **Knowledge-base MCP server:** extends mcp-server-qdrant 0.8.1 (injected bge-m3 embeddings, read-only by default,
+  escaped results); top-10 results identical to direct retrieval on 25/25 queries.
+
+</details>
 
 ## 核心结论
 
 | 评测 | 结论 | 详细报告 |
 |---|---|---|
-| **Agent 工具故障恢复**(ToolMaze C1,100 题 × 5 种故障模式,500 条轨迹) | 本地 4B 模型无故障时成功 70%,**隐式暂时故障下 0%**;隐式 vs 显式配对 **59 : 0**(精确 McNemar p ≈ 3.5 × 10⁻¹⁸)。两类失败模式:显式报错即放弃、隐式坏数据全盘接受;22 条轨迹声称重试过但实际没有 | [`eval/agent_error/`](eval/agent_error/README.md) |
+| **Agent 工具故障恢复**(ToolMaze C1,100 题 × 5 种故障模式,500 条轨迹) | 本地 4B 模型无故障时成功 70%,**隐式暂时故障下 0%**;隐式 vs 显式配对 **59 : 0**(精确 McNemar p ≈ 3.5 × 10⁻¹⁸)。两类失败模式:显式报错即放弃、隐式坏数据全盘接受;22 条轨迹声称重试过但实际没有 | [`eval/agent_error/`](eval/agent_error/README.md) · [`e1_summary.md`](eval/results/e1_summary.md)(由 `summarize_e1.py` 从结果文件重算) |
 | **基准源码审计** | 接入 ToolMaze 时发现 4 处影响结论的问题:无故障组与故障组的系统提示词不同、按路径而不是按结果判分、LLM 裁判在公开代码中从未被调用、45 s 超时会截断思考模式 | [`eval/agent_error/README.md`](eval/agent_error/README.md) |
 | **函数调用**(BFCL v4 分层抽样 150 题) | 84.0% vs 79.3%,不一致 9 : 16,p = 0.23;150 题只能检出约 9.3pp 的差距,检出 5pp 约需 520 题 → 按成本选型 | [`eval/results/fc_bfcl_v2_report.md`](eval/results/fc_bfcl_v2_report.md) |
 | **判分器可信度** | 4 个有效配置第一版判分共 17 个失败,其中 **11 个是误判**;查出的每类缺陷都写成回归测试 | 见下方「评测可信度」 |
@@ -127,7 +151,7 @@ eval/
   rag/                检索评测集(按证据原文标注)与评测脚本
   datasets/           评测数据(来源、协议、抽样方式见 README)
   results/            定稿报告与事先预测
-tests/                43 项单元测试:测"评测工具本身"对不对(判分器、解析、切分、检索)
+tests/                47 项单元测试:测"评测工具本身"对不对(判分器、解析、切分、检索)
 ```
 
 ---
@@ -136,7 +160,7 @@ tests/                43 项单元测试:测"评测工具本身"对不对(判分
 
 ```bash
 pip install -r requirements.txt
-python -m pytest -q                                   # 43 passed
+python -m pytest -q                                   # 47 passed
 
 # 函数调用评测(需要 Ollama 和 qwen3:4b-instruct、qwen3.5:4b)
 python eval/fc/run_fc.py && python eval/fc/summarize_fc.py

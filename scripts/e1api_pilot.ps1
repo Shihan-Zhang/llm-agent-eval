@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 Start-Transcript -Path (Join-Path $Logs "e1api_pilot.log") -Append | Out-Null
 if (-not $env:SILICONFLOW_API_KEY) { throw ".env 里的 SILICONFLOW_API_KEY 为空" }
 
-Step "1. 数据血缘"
+Step "1. 版本记录"
 Write-Host "llm-agent-eval: $(git -C $Root rev-parse --short HEAD)   ToolMaze: $(git -C $TM rev-parse --short HEAD)"
 Write-Host "模型: Qwen/Qwen3.5-35B-A3B @ $env:SILICONFLOW_BASE_URL   日期: $(Get-Date -Format s)"
 
