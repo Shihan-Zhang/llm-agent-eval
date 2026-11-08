@@ -104,3 +104,20 @@ domain ≥ 4 个字符串样本、规范化(去首尾空格、小写)后 ≤ 8 �
 python eval/agent_error/contracts.py build --source gold   # → external/agent_error/results/e2/contracts/gold/
 python eval/agent_error/contracts.py build --source e1     # → .../contracts/e1/
 ```
+
+### E2 阶段 3:离线检测审计(2026-11-08,不调用模型;预测见 `eval/results/predictions.md`,写于运行前)
+
+`python eval/agent_error/audit_e2.py` → `eval/results/e2_audit.md`(按折、按层级与模式、按违反类别、按故障类型)。
+C3/C4 上按工具结果计,第 k 折只用 C_k:
+
+| 指标 | 标准轨迹注册表(主分析) | E1 轨迹注册表(敏感性) | 论文 |
+|---|---|---|---|
+| 召回率 | 88.9%(3042/3420) | 42.1% | 79.6% |
+| 干净误报率 | 1.6%(40/2501) | 3.3% | 1.39% |
+| 契约覆盖率 | 98.6% | 47.0% | 94.2% |
+| 被标记故障中可选工具 ≥ 2 | 83.9% | 76.0% | 91.5%(运行中的回执) |
+
+按故障类型数出的故障结果数与论文表 19 几乎逐项一致(合计 3,420 对 3,407),说明抽取口径相同。
+C4/P3 中可选工具 ≥ 2 只有 64.7%:不足的 489 条都是 book_/build_/place_ 等没有备用工具的公共步骤
+(暂时故障的设计恢复方式是重试);C4/P4 为 100%。E1 来源的瓶颈是覆盖率(只有 C1 的工具),
+有契约时召回率 89.6%,与主分析相近。
