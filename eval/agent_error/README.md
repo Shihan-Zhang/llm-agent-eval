@@ -83,7 +83,7 @@ domain ≥ 4 个字符串样本、规范化(去首尾空格、小写)后 ≤ 8 �
 | 项 | 取值 | 依据 |
 |---|---|---|
 | 分类词表(字段名最后一段命中即算) | action, availability, category, channel, class, condition, currency, department, direction, exchange, kind, level, method, mode, priority, rating, severity, state, status, strategy, tier, trend, type, unit | 盘点 P0 输出的字段名(只看名字、类型、取值个数,不看 P1–P4 与结果),取"状态/类别"语义的词,排除编号、名称、文本 |
-| 三组日期对(f ≤ g) | check_in_date ≤ check_out_date;start_time ≤ end_time;meeting_start_time ≤ meeting_end_time | 同一输出中共现次数 215 / 32 / 16,且语义为"开始 ≤ 结束";可解析 ISO 日期、日期时间、HH:MM,同种类才比较 |
+| 三组日期对(f ≤ g) | check_in_date ≤ check_out_date;start_time ≤ end_time;meeting_start_time ≤ meeting_end_time | 按全部 400 道 P0 题里"字段名在同一输出中的共现次数"选出(215 / 32 / 16),语义为"开始 ≤ 结束";只用字段名,不涉及任何数值,所以不构成泄露。可解析 ISO 日期、日期时间、HH:MM,同种类才比较 |
 | 工具最少样本 | 2(少于 2 个样本的工具不建契约) | 论文未写;1 个样本时"全部字段都必有"过于激进 |
 | 类型约束最少样本 | 2;整数可通过"数值"类型 | 论文未写 |
 | explicit_error 字段名 | error, error_message, errors, exception(非空且不在该工具的正常字段中) | 论文附录 N 的触发实例为 `error` |

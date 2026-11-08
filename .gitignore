@@ -19,3 +19,7 @@ external/
 
 # 岗位表快照(个人求职数据,从 Notion 导出)
 data/jobs/
+
+# 本地的其他项目与 Agent 技能目录,不属于本仓库
+ai-job-search/
+.agents/
