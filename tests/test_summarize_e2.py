@@ -208,3 +208,22 @@ def test_sensitivity_and_replication_sections(tmp_path, monkeypatch):
     # (b) 本次完整回执组 [T, T, F, T] vs ① [T, F, F, T]:一致 3/4,κ = (0.75 − 0.5)/(1 − 0.5) = 0.5
     assert "共同的 4 对" in text and "一致率 3/4 = 75.0%" in text and "Cohen κ = 0.50" in text
     assert "| ① 通过 | 2 | 0 |" in text and "| ① 失败 | 1 | 1 |" in text
+    assert "PA = 2a/(2a+b+c) = 2×2/(2×2 + 0 + 1) = 0.80" in text
+
+
+def test_high_agreement_but_low_kappa_and_pa():
+    # 100 对:都过 1、只有 ① 过 4、只有本次过 4、都失败 91。总一致率 92%,但通过率只有 5%:
+    # p_e = 0.05² + 0.95² = 0.905,κ = (0.92 − 0.905)/(1 − 0.905) ≈ 0.16;PA = 2/(2 + 4 + 4) = 0.2
+    ref = {f"k{i}": i < 5 for i in range(100)}
+    new = {f"k{i}": (i == 0 or 5 <= i < 9) for i in range(100)}
+    rep = S.replication({k: (False, v) for k, v in new.items()}, ref)
+    assert (rep["both"], rep["ref_only"], rep["new_only"], rep["neither"]) == (1, 4, 4, 91)
+    assert rep["agree"] / rep["n"] == pytest.approx(0.92)
+    assert rep["kappa"] == pytest.approx(0.015 / 0.095)
+    assert rep["pa"] == pytest.approx(0.2)
+
+
+def test_positive_agreement_undefined_without_any_pass():
+    assert S.positive_agreement(0, 0, 0) is None
+    rep = S.replication({"k1": (False, False), "k2": (True, False)}, {"k1": False, "k2": False})
+    assert rep["pa"] is None and rep["kappa"] is None and rep["agree"] == 2

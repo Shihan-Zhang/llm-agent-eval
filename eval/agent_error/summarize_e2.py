@@ -15,7 +15,7 @@
   被标记的结果按顺序与 receipts.jsonl 的记录一一对应;工具名对不上即报错。
 - 本地模型:列出单次请求最大输入超过 num_ctx − max_tokens 的回合(Ollama 超出上下文时静默截断)。
 - 敏感性分析:本运行里有同一配置试跑(<results_dir>/pilot/order.json)用过的任务时,去掉这些配对重算主要比较。
-- 复现性(① 以外的运行):完整回执组与 ① 的完整回执组在共同配对上逐对比较,报一致率、Cohen κ 和 2×2 表。
+- 复现性(① 以外的运行):完整回执组与 ① 的完整回执组在共同配对上逐对比较,报一致率、Cohen κ、正一致率 PA 和 2×2 表。
 
 用法:python eval/agent_error/summarize_e2.py --config eval/agent_error/configs/e2_api.yaml --run main
 """
@@ -280,15 +280,24 @@ def cohen_kappa(rows: list[tuple[bool, bool]]) -> float | None:
     return None if pe == 1 else (po - pe) / (1 - pe)
 
 
+def positive_agreement(both: int, only_a: int, only_b: int) -> float | None:
+    """正一致率 PA = 2a/(2a + b + c):只看"至少一次通过"的配对里两次都通过的程度;分母为 0(两次都没有通过)时无定义。
+    通过率低时 κ 和总一致率会被大量"都失败"的配对主导,PA 不受这部分影响。"""
+    denom = 2 * both + only_a + only_b
+    return None if denom == 0 else 2 * both / denom
+
+
 def replication(outcomes: dict, reference: dict[str, bool]) -> dict | None:
     """完整回执组与参考运行(① 的完整回执组)在共同配对上逐对比较:一致率、κ、2×2 表。"""
     rows = [(reference[k], y) for k, (_, y) in sorted(outcomes.items()) if k in reference]
     if not rows:
         return None
+    both, ref_only = sum(a and b for a, b in rows), sum(a and not b for a, b in rows)
+    new_only = sum(b and not a for a, b in rows)
     return {"n": len(rows), "agree": sum(a == b for a, b in rows), "kappa": cohen_kappa(rows),
-            "both": sum(a and b for a, b in rows), "ref_only": sum(a and not b for a, b in rows),
-            "new_only": sum(b and not a for a, b in rows), "neither": sum(not a and not b for a, b in rows),
-            "p": mcnemar_exact(sum(b and not a for a, b in rows), sum(a and not b for a, b in rows))}
+            "pa": positive_agreement(both, ref_only, new_only),
+            "both": both, "ref_only": ref_only, "new_only": new_only, "neither": len(rows) - both - ref_only - new_only,
+            "p": mcnemar_exact(new_only, ref_only)}
 
 
 def extra_lines(s: dict, cn: str, tn: str) -> list[str]:
@@ -304,12 +313,15 @@ def extra_lines(s: dict, cn: str, tn: str) -> list[str]:
     rep = s.get("replication")
     if rep:
         kappa = "无定义(两次运行全部同为通过或同为失败)" if rep["kappa"] is None else f"{rep['kappa']:.2f}"
+        pa = ("无定义(两次都没有通过的配对)" if rep["pa"] is None else
+              f"2×{rep['both']}/(2×{rep['both']} + {rep['ref_only']} + {rep['new_only']}) = {rep['pa']:.2f}")
         out += ["", f"## 复现性:{tn}组与 ① 的{tn}组逐对比较(共同的 {rep['n']} 对)", "",
                 f"| | 本次通过 | 本次失败 |", "|---|---|---|",
                 f"| ① 通过 | {rep['both']} | {rep['ref_only']} |", f"| ① 失败 | {rep['new_only']} | {rep['neither']} |", "",
-                f"一致率 {rate(rep['agree'], rep['n'])};Cohen κ = {kappa};"
+                f"一致率 {rate(rep['agree'], rep['n'])};Cohen κ = {kappa};正一致率 PA = 2a/(2a+b+c) = {pa};"
                 f"两次运行通过率之差的精确 McNemar 双侧 p = {rep['p']:.3g}。",
-                "同一配置、温度 0 重跑,不一致来自 API 端的非确定性;κ 衡量这种抖动下逐题结论有多稳定。"]
+                "同一配置、温度 0 重跑,不一致来自 API 端的非确定性;κ 衡量这种抖动下逐题结论有多稳定。",
+                "通过率低时总一致率主要由「两次都失败」撑起来,κ 又对边缘比例敏感,所以另报 PA:通过过的配对里有多少两次都通过。"]
     return out
 
 
