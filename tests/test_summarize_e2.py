@@ -87,3 +87,31 @@ def test_build_end_to_end_on_synthetic_run():
     assert s["overflow"] == [("C3_task_002_P3", "full", 7000)]
     text = S.render(s, "test")
     assert "C3_task_099" not in text and "胜)1 对" in text
+
+
+def test_paired_difference_intervals_when_no_losses():
+    rows = [(False, True)] * 11 + [(False, False)] * 69
+    p = S.paired(rows)
+    assert p["diff"] == pytest.approx(11 / 80)
+    lo, hi = p["diff_wilson"]
+    assert (round(lo, 4), round(hi, 4)) == (0.0785, 0.2297)          # 报告里的 [7.9%, 23.0%]
+    # 某边缘为 0 → φ = 0:L = δ − √((p₁−l₁)² + (u₂−p₂)²),U = u₁(基线 0/80 时 p₂ = l₂ = 0)
+    l1, u1 = S.wilson(11, 80)
+    _, u2 = S.wilson(0, 80)
+    nlo, nhi = p["diff_newcombe"]
+    assert nlo == pytest.approx(11 / 80 - ((11 / 80 - l1) ** 2 + u2 ** 2) ** 0.5)
+    assert nhi == pytest.approx(u1)
+    assert nlo < lo                                                   # Newcombe 计入了负的不确定性,更宽
+
+
+def test_paired_difference_wilson_only_without_losses_and_newcombe_symmetric():
+    p = S.paired([(False, True)] * 5 + [(True, False)] * 5 + [(True, True)] * 10 + [(False, False)] * 30)
+    assert p["diff"] == 0 and p["diff_wilson"] is None
+    lo, hi = p["diff_newcombe"]
+    assert lo < 0 < hi and lo == pytest.approx(-hi)
+
+
+def test_render_shows_paired_difference():
+    rows = [(False, True)] * 11 + [(False, False)] * 69
+    text = "\n".join(S.diff_lines(S.paired(rows)))
+    assert "13.8%" in text and "Wilson [7.9%, 23.0%]" in text and "Newcombe 方法 10 [6.3%, 23.0%]" in text

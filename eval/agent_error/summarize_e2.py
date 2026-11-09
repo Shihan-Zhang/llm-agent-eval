@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -89,12 +90,34 @@ def rate(k: int, n: int) -> str:
     return f"{k}/{n} = {k / n:.1%} [{max(0.0, lo):.1%}, {min(1.0, hi):.1%}]"   # 截掉浮点误差造成的 -0.0%
 
 
+def newcombe_paired(both: int, wins: int, losses: int, n: int) -> tuple[float, float]:
+    """配对差 δ = (胜 − 负)/n 的 95% 区间:Newcombe (1998) 方法 10,两组各自的 Wilson 区间按 φ 合成。
+    L = δ − √((p₁−l₁)² − 2φ(p₁−l₁)(u₂−p₂) + (u₂−p₂)²),U = δ + √((u₁−p₁)² − 2φ(u₁−p₁)(p₂−l₂) + (p₂−l₂)²);
+    p₁ = 回执组完成率,p₂ = 基线完成率,φ = 2×2 配对表的相关系数(某边缘为 0 时取 0)。"""
+    neither = n - both - wins - losses
+    p1, p2 = (both + wins) / n, (both + losses) / n
+    (l1, u1), (l2, u2) = wilson(both + wins, n), wilson(both + losses, n)
+    denom = math.sqrt((both + wins) * (losses + neither) * (both + losses) * (wins + neither))
+    phi = (both * neither - wins * losses) / denom if denom else 0.0
+    delta = p1 - p2
+    lo = delta - math.sqrt(max(0.0, (p1 - l1) ** 2 - 2 * phi * (p1 - l1) * (u2 - p2) + (u2 - p2) ** 2))
+    hi = delta + math.sqrt(max(0.0, (u1 - p1) ** 2 - 2 * phi * (u1 - p1) * (p2 - l2) + (p2 - l2) ** 2))
+    return max(-1.0, lo), min(1.0, hi)
+
+
 def paired(rows: list[tuple[bool, bool]]) -> dict:
     """rows = [(基线通过, 回执通过)]。"""
     b = sum(1 for x, y in rows if not x and y)       # 只有回执组完成(胜)
     c = sum(1 for x, y in rows if x and not y)       # 只有基线完成(负)
-    return {"n": len(rows), "base": sum(x for x, _ in rows), "treat": sum(y for _, y in rows),
-            "wins": b, "losses": c, "p": mcnemar_exact(b, c)}
+    both = sum(1 for x, y in rows if x and y)
+    n = len(rows)
+    out = {"n": n, "base": sum(x for x, _ in rows), "treat": sum(y for _, y in rows),
+           "wins": b, "losses": c, "both": both, "p": mcnemar_exact(b, c)}
+    if n:
+        out["diff"] = (b - c) / n
+        out["diff_newcombe"] = newcombe_paired(both, b, c, n)
+        out["diff_wilson"] = wilson(b, n) if c == 0 else None   # 负 = 0 时 δ = 胜/n,可用 Wilson(胜, n)
+    return out
 
 
 def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, receipts: dict, folds_regs,
@@ -153,6 +176,24 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
             "win_label": win_label, "overflow": overflow, "prompt_budget": prompt_budget}
 
 
+def pct_ci(lo: float, hi: float) -> str:
+    return f"[{max(-1.0, lo):.1%}, {min(1.0, hi):.1%}]"
+
+
+def diff_lines(p: dict) -> list[str]:
+    """配对差 δ = (胜 − 负)/n 的点估计与 95% 区间。"""
+    if not p["n"]:
+        return []
+    out = [f"配对差 δ = (胜 − 负)/n = ({p['wins']} − {p['losses']})/{p['n']} = {p['diff']:.1%}(= 回执组完成率 − 基线完成率)。", ""]
+    if p["diff_wilson"] is not None:
+        out += [f"- Wilson {pct_ci(*p['diff_wilson'])}:负 = 0 时 δ = 胜/n,取 Wilson(胜, n),"
+                f"即 (p̂ + z²/2n ± z·√(p̂(1−p̂)/n + z²/4n²)) / (1 + z²/n),p̂ = {p['wins']}/{p['n']},z = 1.96;"
+                "它把负的配对数当作确定的 0,没有计入负的抽样不确定性,所以下界偏乐观。"]
+    out += [f"- Newcombe 方法 10 {pct_ci(*p['diff_newcombe'])}:两组完成率各取 Wilson 区间,按配对相关 φ 合成"
+            "(公式见 summarize_e2.newcombe_paired);任何胜 / 负组合都适用,作为配对差的主区间。", ""]
+    return out
+
+
 def render(s: dict, title: str) -> str:
     p = s["primary"]
     lines = [f"# {title}(由 eval/agent_error/summarize_e2.py 生成,勿手改)", "",
@@ -165,7 +206,7 @@ def render(s: dict, title: str) -> str:
              "| 组 | 完成率 [95% Wilson] |", "|---|---|",
              f"| 基线 | {rate(p['base'], p['n'])} |", f"| 完整回执 | {rate(p['treat'], p['n'])} |", "",
              f"不一致配对:只有回执组完成(胜){p['wins']} 对,只有基线完成(负){p['losses']} 对;"
-             f"精确 McNemar 双侧 p = {p['p']:.3g}。", "",
+             f"精确 McNemar 双侧 p = {p['p']:.3g}。", ""] + diff_lines(p) + [
              "| 层级 | 模式 | 配对 | 基线 | 回执 | 胜 : 负 | p |", "|---|---|---|---|---|---|---|"]
     for (tier, mode), q in s["strata"].items():
         lines.append(f"| {tier.upper()} | {mode} | {q['n']} | {q['base']} | {q['treat']} | {q['wins']} : {q['losses']} | {q['p']:.3g} |")
