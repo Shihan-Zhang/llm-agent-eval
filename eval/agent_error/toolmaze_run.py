@@ -18,6 +18,10 @@ B. 导入:run_e2.py 调用 apply_patches(cfg, cfg_path),再逐回合调用上游
 6. Outcome Monitor(E2):包装 receive_tool_result。只有当 run_e2 在当前线程设置了 EPISODE.monitor 时才生效;
    用 receipt.augment 检查工具结果,违反时把 {"tool_result", "outcome_contract"} 交给模型。
    判分读的是 ExecutionEngine 记录的原始结果(log_round 在 receive_tool_result 之前),不受影响。
+7. 无属性对象(patch.bare_object_additional_properties,可选):包装 initialize,给工具 schema 里只写
+   type: object、没有 properties 的参数加 additionalProperties: true(tool_schema.py)。不加时硅基流动
+   把这类参数压成 {}(Qwen)或 ""(DeepSeek),见 schema_probe/results/summary.md。只改发给模型的工具列表,
+   工具执行与判分不变。
 """
 from __future__ import annotations
 
@@ -38,6 +42,7 @@ TM = os.environ.get("TOOLMAZE_DIR", os.path.join(ROOT, "external", "agent_error"
 sys.path.insert(0, HERE)
 from ratelimit import Limits, TokenBucket, TokenEstimator  # noqa: E402
 from receipt import augment  # noqa: E402
+from tool_schema import allow_additional_properties, map_tools  # noqa: E402
 
 # run_e2 在每个工作线程里设置:labels(dict)、monitor(None 或 {registry, subs, variant, log})、stats(dict)
 EPISODE = threading.local()
@@ -237,10 +242,20 @@ def apply_patches(cfg: dict, cfg_path: str, agent_cls: type | None = None) -> di
             limiter=shared["limiter"], estimator=shared["estimator"], retry=retry)
 
     agent_cls.__init__ = init
+    bare_patch = bool(patch.get("bare_object_additional_properties"))
+    if bare_patch:
+        orig_initialize = agent_cls.initialize
+
+        def initialize(self, *a, **k):
+            orig_initialize(self, *a, **k)
+            self.tools = map_tools(self.tools, allow_additional_properties)
+
+        agent_cls.initialize = initialize
     agent_cls.receive_tool_result = monitored_receive(agent_cls.receive_tool_result)
     agent_cls.__toolmaze_run_patched__ = True
     agent_cls.__toolmaze_run_shared__ = shared
-    print(f"[toolmaze_run] timeout={timeout}s extra_body={extra} retry={retry} rate_limit={rl} call_log={shared['log']}")
+    print(f"[toolmaze_run] timeout={timeout}s extra_body={extra} retry={retry} rate_limit={rl} call_log={shared['log']} "
+          f"bare_object_additional_properties={bare_patch}")
     return shared
 
 

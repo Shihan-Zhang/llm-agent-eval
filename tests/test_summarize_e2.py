@@ -177,6 +177,7 @@ def _run_main_on_stripped(tmp_path, monkeypatch, outcomes, pilot=(), reference=N
     (tmp_path / "eval" / "results").mkdir(parents=True)
     monkeypatch.setattr(S, "ROOT", str(tmp_path))
     monkeypatch.setattr(S.C, "load", lambda path: ([{} for _ in range(5)], {p.task_id: 0 for p in pairs}))
+    monkeypatch.setattr(S.TS, "load_bare_params", lambda d: frozenset({("book", "card")}))
     monkeypatch.setattr(sys, "argv", ["summarize_e2.py", "--config", str(cfg), "--run", "stripped"])
     S.main()
     return (tmp_path / "eval" / "results" / "e2_api_stripped_summary.md").read_text(encoding="utf-8"), pairs
@@ -227,3 +228,35 @@ def test_positive_agreement_undefined_without_any_pass():
     assert S.positive_agreement(0, 0, 0) is None
     rep = S.replication({"k1": (False, False), "k2": (True, False)}, {"k1": False, "k2": False})
     assert rep["pa"] is None and rep["kappa"] is None and rep["agree"] == 2
+
+
+# ---------------------------------------------------------------- 管线标注(无属性 object 参数)
+BARE = frozenset({("archive", "card")})
+
+
+def _inf(*values):
+    return {"messages": [call(i, "archive", {"card": v}) for i, v in enumerate(values)]}
+
+
+def test_pipeline_counts_bare_arguments_per_arm_and_reads_patch_flag():
+    inferences = {("p1", "baseline"): _inf({}, {"id": "A1"}), ("p1", "full"): _inf({}, "", None, "A1")}
+    pl = S.pipeline({}, inferences, BARE)
+    assert pl["patched"] is False
+    assert pl["counts"] == {"baseline": {"empty": 1, "nonempty": 1}, "full": {"empty": 3, "other": 1}}
+    assert S.pipeline({"bare_object_additional_properties": True}, {}, BARE)["patched"] is True
+
+
+def test_pipeline_lines_mark_old_pipeline_and_show_counts():
+    old = "\n".join(S.pipeline_lines(S.pipeline({}, {("p1", "full"): _inf({}, {})}, BARE)))
+    assert S.OLD_PIPELINE in old and "完整回执组:无属性 object 参数 2 次,传空 2/2" in old
+    new = "\n".join(S.pipeline_lines(S.pipeline({"bare_object_additional_properties": True},
+                                               {("p1", "full"): _inf({"id": "A1"})}, BARE)))
+    assert S.OLD_PIPELINE not in new and "additionalProperties: true" in new and "非空对象 1" in new
+    local = "\n".join(S.pipeline_lines(S.pipeline({}, {("p1", "full"): _inf({"id": "A1"}, {})}, BARE)))
+    assert S.OLD_PIPELINE not in local and "未打补丁" in local          # 本地运行没有被压成 {},不贴旧管线标签
+    assert S.pipeline_lines(None) == []
+
+
+def test_main_reports_pipeline_from_order_and_inferences(tmp_path, monkeypatch):
+    text, _ = _run_main_on_stripped(tmp_path, monkeypatch, [(True, True)])   # 没有 order.json,轨迹里没有 card 参数
+    assert "工具 schema 未打补丁;本运行没有调用带无属性 object 参数的工具" in text

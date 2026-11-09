@@ -243,6 +243,30 @@ def test_patched_init_wraps_client_create(tmp_path):
     assert T.EPISODE.stats["calls"] == 1
 
 
+BARE_PARAMS = {"type": "object", "properties": {"alert_card": {"type": "object", "description": "card"},
+                                                "title": {"type": "string"}}, "required": ["alert_card", "title"]}
+
+
+def _initializing_agent_cls():
+    class InitAgent(_agent_cls()):
+        def initialize(self, task_description, tool_definitions):
+            self.tools = [{"type": "function", "function": {"name": d, "parameters": BARE_PARAMS}} for d in tool_definitions]
+    return InitAgent
+
+
+@pytest.mark.parametrize("flag,expected", [(True, True), (False, None)])
+def test_bare_object_patch_adds_additional_properties_after_initialize(tmp_path, flag, expected):
+    # 硅基流动上无属性 object 参数被压成 {}(schema_probe/results/summary.md);补丁只在配置打开时生效
+    cls = _initializing_agent_cls()
+    T.apply_patches({"patch": {"bare_object_additional_properties": flag}}, str(tmp_path / "c.yaml"), agent_cls=cls)
+    a = cls()
+    a.initialize("task", ["archive"])
+    card = a.tools[0]["function"]["parameters"]["properties"]["alert_card"]
+    assert card.get("additionalProperties") is expected
+    assert a.tools[0]["function"]["parameters"]["properties"]["title"] == {"type": "string"}
+    assert BARE_PARAMS["properties"]["alert_card"] == {"type": "object", "description": "card"}   # 不改上游的定义对象
+
+
 # ---------------------------------------------------------------- 编排
 MANIFEST = {"main": [{"tier": "c3", "task_id": "C3_task_001", "mode": "P3"},
                      {"tier": "c4", "task_id": "C4_task_002", "mode": "P4"}],
@@ -299,15 +323,26 @@ def test_estimate_extrapolates_tokens_time_cost_and_context():
     assert est["prompt_budget"] == 6144 and est["fits_context"] is False
 
 
-@pytest.mark.parametrize("name", ["e2_api.yaml", "e2_local.yaml"])
+@pytest.mark.parametrize("name", ["e2_api.yaml", "e2_api_v2.yaml", "e2_local.yaml"])
 def test_real_configs_have_valid_arms_and_groups(name):
     cfg = E.load_cfg(os.path.join(ROOT, "eval", "agent_error", "configs", name))
     for run, spec in cfg["e2"]["runs"].items():
         variants = {a: E.arm_variant(v) for a, v in spec["arms"].items()}
         assert set(variants.values()) <= {None, "full", "stripped"}, run
         assert spec["episodes"] in {"main", "main_ext", "p0", "c1", "pilot"}, run
-    assert {"main", "pilot"} <= set(cfg["e2"]["runs"])
+    assert "main" in cfg["e2"]["runs"]
     assert cfg["agent"]["temperature"] == 0
+
+
+def test_v2_config_differs_from_old_only_in_schema_patch_and_output():
+    old, new = (E.load_cfg(os.path.join(ROOT, "eval", "agent_error", "configs", n)) for n in ("e2_api.yaml", "e2_api_v2.yaml"))
+    assert new["patch"].pop("bare_object_additional_properties") is True and "bare_object_additional_properties" not in old["patch"]
+    assert new["e2"]["results_dir"] != old["e2"]["results_dir"]
+    assert new["e2"].pop("pilot_results_dir") == old["e2"]["results_dir"] and new["e2"].pop("tag") == "api_v2"
+    for d in (old, new):
+        d["e2"].pop("results_dir")
+    old["e2"]["runs"].pop("pilot")
+    assert new == old
 
 
 def test_arm_variant_accepts_yaml_false_and_rejects_unknown():

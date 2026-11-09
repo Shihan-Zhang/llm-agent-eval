@@ -1,5 +1,6 @@
 """
-汇总 E2 一次运行(如 API ① 或本地 main),写 eval/results/e2_<api|local>_<run>_summary.md。
+汇总 E2 一次运行(如 API ① 或本地 main),写 eval/results/e2_<tag>_<run>_summary.md
+(tag 取配置 e2.tag,默认 api / local)。
 
 只统计冻结清单(configs/e2_manifest.json)里该运行的配对;试跑目录与清单之外的记录不进入结果。
 每个(配对, 组)取最近一次尝试;只用两组都完成且没有 API 错误的配对。
@@ -14,7 +15,10 @@
 - 回执与轨迹对齐:用同一份注册表重新检查回执组轨迹里的每个工具结果(检查是确定性的),
   被标记的结果按顺序与 receipts.jsonl 的记录一一对应;工具名对不上即报错。
 - 本地模型:列出单次请求最大输入超过 num_ctx − max_tokens 的回合(Ollama 超出上下文时静默截断)。
-- 敏感性分析:本运行里有同一配置试跑(<results_dir>/pilot/order.json)用过的任务时,去掉这些配对重算主要比较。
+- 敏感性分析:本运行里有试跑(<e2.pilot_results_dir,默认 results_dir>/pilot/order.json)用过的任务时,
+  去掉这些配对重算主要比较。
+- 管线:order.json 里有没有 bare_object_additional_properties(工具 schema 补丁,toolmaze_run 第 7 条);
+  另按组统计推理文件里顶层无属性 object 参数传空({}、""、null)/ 非空对象 / 其他的次数。
 - 复现性(① 以外的运行):完整回执组与 ① 的完整回执组在共同配对上逐对比较,报一致率、Cohen κ、正一致率 PA 和 2×2 表。
 
 用法:python eval/agent_error/summarize_e2.py --config eval/agent_error/configs/e2_api.yaml --run main
@@ -35,6 +39,7 @@ sys.path.insert(0, os.path.join(ROOT, "eval", "fc"))
 import contracts as C  # noqa: E402
 import e2_manifest as M  # noqa: E402
 import run_e2 as E  # noqa: E402
+import tool_schema as TS  # noqa: E402
 from summarize_fc import mcnemar_exact, wilson  # noqa: E402
 
 CLASSES = ("injected", "tool_error", "normal")
@@ -214,6 +219,40 @@ def diff_lines(p: dict, cn: str = ARM_NAMES[BASELINE], tn: str = ARM_NAMES[TREAT
     return out
 
 
+OLD_PIPELINE = "旧管线:无属性 object 参数被压成 {}"
+
+
+def pipeline(order: dict, inferences: dict, bare: frozenset) -> dict:
+    """运行时是否打了无属性对象补丁(order.json),以及各组推理文件里这类参数的取值次数。"""
+    counts = defaultdict(Counter)
+    for (_, arm), d in inferences.items():
+        counts[arm] += TS.bare_argument_states(d.get("messages") or [], bare)
+    return {"patched": bool(order.get("bare_object_additional_properties")), "counts": dict(counts)}
+
+
+def pipeline_lines(pl: dict | None) -> list[str]:
+    if not pl:
+        return []
+    total = Counter()
+    for c in pl["counts"].values():
+        total += c
+    if pl["patched"]:
+        head = "新管线:工具 schema 里的无属性 object 参数已加 additionalProperties: true"
+    elif not total:
+        head = "工具 schema 未打补丁;本运行没有调用带无属性 object 参数的工具"
+    elif total["empty"] * 2 > sum(total.values()):
+        head = (f"{OLD_PIPELINE}(工具 schema 未打补丁;硅基流动把只写 type: object 的参数压成空值,"
+                "见 eval/agent_error/schema_probe/results/summary.md)")
+    else:
+        head = "工具 schema 未打补丁,但本运行里无属性 object 参数大多正常传值(不受硅基流动压成 {} 的问题影响)"
+    out = [f"- {head}"]
+    for arm, c in sorted(pl["counts"].items()):
+        n = sum(c.values())
+        out.append(f"- {ARM_NAMES.get(arm, arm)}组:无属性 object 参数 {n} 次,传空 {rate(c['empty'], n)},"
+                   f"非空对象 {c['nonempty']},其他类型 {c['other']}")
+    return out
+
+
 def render(s: dict, title: str) -> str:
     p = s["primary"]
     cn, tn = ARM_NAMES[s["control"]], ARM_NAMES[TREATED]
@@ -222,7 +261,8 @@ def render(s: dict, title: str) -> str:
              f"- 冻结清单配对 {s['n_manifest']} 对;两组都完成且无 API 错误 {s['done']} 对;未完成 {len(s['unresolved'])} 对"
              + (f"({', '.join(s['unresolved'][:10])})" if s["unresolved"] else ""),
              f"- 因 API 错误或中断整对重跑 {s['pair_reruns']} 次;最终回答含 \"Error during execution\" 的回合 "
-             f"{s['error_in_answer']} 个(多为模型参数无法解析等非 API 原因);运行框架报错 {s['harness_errors']} 个", "",
+             f"{s['error_in_answer']} 个(多为模型参数无法解析等非 API 原因);运行框架报错 {s['harness_errors']} 个",
+             *pipeline_lines(s.get("pipeline")), "",
              f"## 主要比较:配对完成率({cn} vs {tn})", "",
              "| 组 | 完成率 [95% Wilson] |", "|---|---|",
              f"| {cn} | {rate(p['base'], p['n'])} |", f"| {tn} | {rate(p['treat'], p['n'])} |", "",
@@ -325,6 +365,14 @@ def extra_lines(s: dict, cn: str, tn: str) -> list[str]:
     return out
 
 
+def read_order(run_dir: str) -> dict:
+    path = os.path.join(run_dir, "order.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def pilot_tasks(results_dir: str) -> set[str]:
     """同一配置试跑用过的任务(<results_dir>/pilot/order.json);没有试跑记录时为空集。"""
     path = os.path.join(results_dir, "pilot", "order.json")
@@ -377,9 +425,11 @@ def main() -> None:
     s = build(records, pairs, inferences, receipts, C.load(os.path.join(C.OUT, e2.get("registry", "gold"))), budget,
               control)
     results_dir = os.path.dirname(out)
-    s["sensitivity"] = sensitivity(s["outcomes"], pairs, pilot_tasks(results_dir))
+    pilot_root = os.path.abspath(os.path.join(os.path.dirname(cfg_path), e2.get("pilot_results_dir", e2["results_dir"])))
+    s["sensitivity"] = sensitivity(s["outcomes"], pairs, pilot_tasks(pilot_root))
     s["replication"] = replication(s["outcomes"], reference_full(results_dir) if a.run != "main" else {})
-    src = "local" if e2.get("num_ctx") else "api"
+    s["pipeline"] = pipeline(read_order(out), inferences, TS.load_bare_params(os.path.join(E.T.TM, "tools", "definitions")))
+    src = e2.get("tag") or ("local" if e2.get("num_ctx") else "api")
     text = render(s, f"E2 {src} / {a.run}:{cfg['agent']['model']}")
     path = os.path.join(ROOT, "eval", "results", f"e2_{src}_{a.run}_summary.md")
     with open(path, "w", encoding="utf-8") as fh:

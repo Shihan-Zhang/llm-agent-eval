@@ -161,6 +161,7 @@ class Runner:
         self.plan = plan_order(self.pairs, list(self.arms), e2["seed"])
         with open(os.path.join(self.out, "order.json"), "w", encoding="utf-8") as fh:
             json.dump({"seed": e2["seed"], **M.hashes(manifest),
+                       "bare_object_additional_properties": bool(cfg["patch"].get("bare_object_additional_properties")),
                        "order": [{**asdict(p), "arms": a} for p, a in self.plan]}, fh, indent=1)
         self.lock = threading.Lock()
         self.reruns = 0
