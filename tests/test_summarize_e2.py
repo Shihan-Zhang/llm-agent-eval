@@ -142,14 +142,18 @@ def test_compared_arms_from_real_configs():
         S.compared_arms({"arms": {"baseline": "off", "stripped": "stripped"}})
 
 
-def test_main_summarizes_stripped_run_against_stripped_arm(tmp_path, monkeypatch):
-    """回归:main() 原先不把对照组传给 build,默认找 baseline,② 的 80 对全被判为未完成。"""
+
+def _run_main_on_stripped(tmp_path, monkeypatch, outcomes, pilot=(), reference=None):
+    """在 tmp_path 下造一个 ② 运行目录(full / stripped 两组),经 main() 汇总,返回汇总文本。
+    outcomes = [(stripped 通过, full 通过)],依次对应冻结清单 main 的前几对;
+    pilot = 试跑用过的任务编号;reference = ① 完整回执组每对的通过与否(列表,与 outcomes 对齐)。"""
     import json
-    pairs = E.pairs_for("main", S.M.load())[:2]
-    out = tmp_path / "res" / "stripped"
+    pairs = E.pairs_for("main", S.M.load())[:len(outcomes)]
+    res_dir = tmp_path / "res"
+    out = res_dir / "stripped"
     traj = {"messages": [call(1, "book"), res(1, "book", {"ok": 1})]}
     recs = []
-    for p, (s_pass, f_pass) in zip(pairs, [(False, True), (False, False)]):
+    for p, (s_pass, f_pass) in zip(pairs, outcomes):
         for arm, passed in (("stripped", s_pass), ("full", f_pass)):
             recs.append(_record(p.key, arm, passed, tier=p.tier))
             d = out / arm / "m" / "fc" / p.tier / "inferences"
@@ -157,9 +161,17 @@ def test_main_summarizes_stripped_run_against_stripped_arm(tmp_path, monkeypatch
             (d / f"{p.key}_inference.json").write_text(json.dumps(traj), encoding="utf-8")
     (out / "episodes.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
     (out / "receipts.jsonl").write_text("", encoding="utf-8")
+    if pilot:
+        (res_dir / "pilot").mkdir()
+        (res_dir / "pilot" / "order.json").write_text(
+            json.dumps({"order": [{"tier": "c3", "task_id": t, "mode": "P3", "arms": []} for t in pilot]}), encoding="utf-8")
+    if reference is not None:
+        (res_dir / "main").mkdir()
+        ref = [_record(p.key, "full", passed, tier=p.tier) for p, passed in zip(pairs, reference)]
+        (res_dir / "main" / "episodes.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ref), encoding="utf-8")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(json.dumps({"agent": {"model": "m", "max_tokens": 100}, "e2": {
-        "results_dir": str(tmp_path / "res"),
+        "results_dir": str(res_dir),
         "runs": {"stripped": {"episodes": "main", "arms": {"full": "full", "stripped": "stripped"}}}}}),
         encoding="utf-8")
     (tmp_path / "eval" / "results").mkdir(parents=True)
@@ -167,6 +179,32 @@ def test_main_summarizes_stripped_run_against_stripped_arm(tmp_path, monkeypatch
     monkeypatch.setattr(S.C, "load", lambda path: ([{} for _ in range(5)], {p.task_id: 0 for p in pairs}))
     monkeypatch.setattr(sys, "argv", ["summarize_e2.py", "--config", str(cfg), "--run", "stripped"])
     S.main()
-    text = (tmp_path / "eval" / "results" / "e2_api_stripped_summary.md").read_text(encoding="utf-8")
+    return (tmp_path / "eval" / "results" / "e2_api_stripped_summary.md").read_text(encoding="utf-8"), pairs
+
+
+def test_main_summarizes_stripped_run_against_stripped_arm(tmp_path, monkeypatch):
+    """回归:main() 原先不把对照组传给 build,默认找 baseline,② 的 80 对全被判为未完成。"""
+    text, _ = _run_main_on_stripped(tmp_path, monkeypatch, [(False, True), (False, False)])
     assert "两组都完成且无 API 错误 2 对" in text
     assert "只有完整回执组完成(胜)1 对" in text
+    assert "敏感性分析" not in text and "复现性" not in text      # 没有试跑重叠、没有 ① 记录时不出这两节
+
+
+def test_cohen_kappa_known_values():
+    rows = [(True, True)] * 20 + [(True, False)] * 5 + [(False, True)] * 10 + [(False, False)] * 15
+    assert S.cohen_kappa(rows) == pytest.approx(0.4)        # p_o 0.7,p_e 0.5·0.6 + 0.5·0.4 = 0.5
+    assert S.cohen_kappa([(True, True), (False, False)]) == pytest.approx(1.0)
+    assert S.cohen_kappa([(False, False)] * 3) is None
+
+
+def test_sensitivity_and_replication_sections(tmp_path, monkeypatch):
+    outcomes = [(False, True), (False, True), (False, False), (True, True)]
+    pilot_task = E.pairs_for("main", S.M.load())[0].task_id
+    text, pairs = _run_main_on_stripped(tmp_path, monkeypatch, outcomes, pilot=[pilot_task, "C3_task_999"],
+                                        reference=[True, False, False, True])
+    # (a) 去掉第 1 对(试跑重叠)后剩 3 对:胜 1(第 2 对)、负 0
+    assert "## 敏感性分析:去掉与试跑重叠的任务" in text and f"去掉 1 对({pairs[0].key}" in text
+    assert "剩 3 对" in text and "胜 : 负 = 1 : 0" in text
+    # (b) 本次完整回执组 [T, T, F, T] vs ① [T, F, F, T]:一致 3/4,κ = (0.75 − 0.5)/(1 − 0.5) = 0.5
+    assert "共同的 4 对" in text and "一致率 3/4 = 75.0%" in text and "Cohen κ = 0.50" in text
+    assert "| ① 通过 | 2 | 0 |" in text and "| ① 失败 | 1 | 1 |" in text

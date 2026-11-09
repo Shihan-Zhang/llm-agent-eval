@@ -14,6 +14,8 @@
 - 回执与轨迹对齐:用同一份注册表重新检查回执组轨迹里的每个工具结果(检查是确定性的),
   被标记的结果按顺序与 receipts.jsonl 的记录一一对应;工具名对不上即报错。
 - 本地模型:列出单次请求最大输入超过 num_ctx − max_tokens 的回合(Ollama 超出上下文时静默截断)。
+- 敏感性分析:本运行里有同一配置试跑(<results_dir>/pilot/order.json)用过的任务时,去掉这些配对重算主要比较。
+- 复现性(① 以外的运行):完整回执组与 ① 的完整回执组在共同配对上逐对比较,报一致率、Cohen κ 和 2×2 表。
 
 用法:python eval/agent_error/summarize_e2.py --config eval/agent_error/configs/e2_api.yaml --run main
 """
@@ -151,10 +153,12 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
     win_label = Counter()
     strata = defaultdict(list)
     rows = []
+    outcomes = {}                          # 配对 → (对照组通过, 完整回执组通过)
     for k in done:
         p = keys[k]
         x, y = bool(latest[(k, control)]["passed"]), bool(latest[(k, TREATED)]["passed"])
         rows.append((x, y))
+        outcomes[k] = (x, y)
         strata[(p.tier, p.mode)].append((x, y))
         win = (not x) and y
         events = tool_events(inferences[(k, TREATED)])
@@ -187,7 +191,8 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
             "harness_errors": sum(bool(r.get("harness_error")) for r in eps),
             "primary": paired(rows), "strata": {s: paired(v) for s, v in sorted(strata.items())},
             "cls_n": cls_n, "cls_r": cls_r, "cls_ge2": cls_ge2, "resp_all": resp_all, "resp_win": resp_win,
-            "win_label": win_label, "overflow": overflow, "prompt_budget": prompt_budget, "control": control}
+            "win_label": win_label, "overflow": overflow, "prompt_budget": prompt_budget, "control": control,
+            "outcomes": outcomes}
 
 
 def pct_ci(lo: float, hi: float) -> str:
@@ -251,7 +256,77 @@ def render(s: dict, title: str) -> str:
         lines += ["", f"## 输入长度(预算 {s['prompt_budget']} token = num_ctx − max_tokens)", "",
                   f"单次请求最大输入超过预算的回合:{len(s['overflow'])} 个" + ("。" if not s["overflow"] else ":")]
         lines += [f"- {pair} {arm}:{mx}" for pair, arm, mx in s["overflow"]]
+    lines += extra_lines(s, cn, tn)
     return "\n".join(lines) + "\n"
+
+
+def sensitivity(outcomes: dict, pairs: list[E.Pair], excluded_tasks: set[str]) -> dict | None:
+    """去掉 excluded_tasks(如试跑用过的任务)后重算配对比较;本运行里没有这些任务时返回 None。"""
+    drop = {p.key for p in pairs if p.task_id in excluded_tasks and p.key in outcomes}
+    if not drop:
+        return None
+    rows = [v for k, v in outcomes.items() if k not in drop]
+    return {"dropped": sorted(drop), **paired(rows)}
+
+
+def cohen_kappa(rows: list[tuple[bool, bool]]) -> float | None:
+    """两次运行逐对通过与否的 Cohen κ = (p_o − p_e)/(1 − p_e);p_e = 1(两边全同一类)时无定义,返回 None。"""
+    n = len(rows)
+    if not n:
+        return None
+    po = sum(a == b for a, b in rows) / n
+    p1, p2 = sum(a for a, _ in rows) / n, sum(b for _, b in rows) / n
+    pe = p1 * p2 + (1 - p1) * (1 - p2)
+    return None if pe == 1 else (po - pe) / (1 - pe)
+
+
+def replication(outcomes: dict, reference: dict[str, bool]) -> dict | None:
+    """完整回执组与参考运行(① 的完整回执组)在共同配对上逐对比较:一致率、κ、2×2 表。"""
+    rows = [(reference[k], y) for k, (_, y) in sorted(outcomes.items()) if k in reference]
+    if not rows:
+        return None
+    return {"n": len(rows), "agree": sum(a == b for a, b in rows), "kappa": cohen_kappa(rows),
+            "both": sum(a and b for a, b in rows), "ref_only": sum(a and not b for a, b in rows),
+            "new_only": sum(b and not a for a, b in rows), "neither": sum(not a and not b for a, b in rows),
+            "p": mcnemar_exact(sum(b and not a for a, b in rows), sum(a and not b for a, b in rows))}
+
+
+def extra_lines(s: dict, cn: str, tn: str) -> list[str]:
+    out = []
+    sen = s.get("sensitivity")
+    if sen:
+        out += ["", "## 敏感性分析:去掉与试跑重叠的任务", "",
+                f"去掉 {len(sen['dropped'])} 对({', '.join(sen['dropped'])};这些任务用作过试跑,结果未计入),剩 {sen['n']} 对:", "",
+                "| 组 | 完成率 [95% Wilson] |", "|---|---|",
+                f"| {cn} | {rate(sen['base'], sen['n'])} |", f"| {tn} | {rate(sen['treat'], sen['n'])} |", "",
+                f"胜 : 负 = {sen['wins']} : {sen['losses']},精确 McNemar 双侧 p = {sen['p']:.3g};"
+                f"配对差 δ = {sen['diff']:.1%},Newcombe {pct_ci(*sen['diff_newcombe'])}。"]
+    rep = s.get("replication")
+    if rep:
+        kappa = "无定义(两次运行全部同为通过或同为失败)" if rep["kappa"] is None else f"{rep['kappa']:.2f}"
+        out += ["", f"## 复现性:{tn}组与 ① 的{tn}组逐对比较(共同的 {rep['n']} 对)", "",
+                f"| | 本次通过 | 本次失败 |", "|---|---|---|",
+                f"| ① 通过 | {rep['both']} | {rep['ref_only']} |", f"| ① 失败 | {rep['new_only']} | {rep['neither']} |", "",
+                f"一致率 {rate(rep['agree'], rep['n'])};Cohen κ = {kappa};"
+                f"两次运行通过率之差的精确 McNemar 双侧 p = {rep['p']:.3g}。",
+                "同一配置、温度 0 重跑,不一致来自 API 端的非确定性;κ 衡量这种抖动下逐题结论有多稳定。"]
+    return out
+
+
+def pilot_tasks(results_dir: str) -> set[str]:
+    """同一配置试跑用过的任务(<results_dir>/pilot/order.json);没有试跑记录时为空集。"""
+    path = os.path.join(results_dir, "pilot", "order.json")
+    if not os.path.exists(path):
+        return set()
+    with open(path, encoding="utf-8") as fh:
+        return {e["task_id"] for e in json.load(fh)["order"]}
+
+
+def reference_full(results_dir: str, ref_run: str = "main") -> dict[str, bool]:
+    """参考运行(①)里完整回执组每对最近一次、无 API 错误的通过与否。"""
+    recs = E.read_records(os.path.join(results_dir, ref_run, "episodes.jsonl"))
+    return {r["pair"]: bool(r["passed"]) for r in E.latest_records(recs)
+            if r["arm"] == TREATED and r["api_failures"] == 0}
 
 
 # ---------------------------------------------------------------- 读文件
@@ -289,6 +364,9 @@ def main() -> None:
     control, _ = compared_arms(e2["runs"][a.run])
     s = build(records, pairs, inferences, receipts, C.load(os.path.join(C.OUT, e2.get("registry", "gold"))), budget,
               control)
+    results_dir = os.path.dirname(out)
+    s["sensitivity"] = sensitivity(s["outcomes"], pairs, pilot_tasks(results_dir))
+    s["replication"] = replication(s["outcomes"], reference_full(results_dir) if a.run != "main" else {})
     src = "local" if e2.get("num_ctx") else "api"
     text = render(s, f"E2 {src} / {a.run}:{cfg['agent']['model']}")
     path = os.path.join(ROOT, "eval", "results", f"e2_{src}_{a.run}_summary.md")
