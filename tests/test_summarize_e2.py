@@ -115,3 +115,28 @@ def test_render_shows_paired_difference():
     rows = [(False, True)] * 11 + [(False, False)] * 69
     text = "\n".join(S.diff_lines(S.paired(rows)))
     assert "13.8%" in text and "Wilson [7.9%, 23.0%]" in text and "Newcombe 方法 10 [6.3%, 23.0%]" in text
+
+
+def test_stripped_run_compares_full_against_stripped():
+    pairs = [E.Pair("c3", "C3_task_001", "P3"), E.Pair("c3", "C3_task_002", "P3")]
+    records = [
+        _record("C3_task_001_P3", "stripped", False), _record("C3_task_001_P3", "full", True),     # 胜:只有完整回执完成
+        _record("C3_task_002_P3", "stripped", True), _record("C3_task_002_P3", "full", False),     # 负
+    ]
+    traj = {"messages": [call(1, "book"), res(1, "book", {"ok": 1})]}
+    inferences = {("C3_task_001_P3", "full"): traj, ("C3_task_002_P3", "full"): traj}
+    folds = {"C3_task_001": 0, "C3_task_002": 1}
+    regs = [{} for _ in range(5)]
+    s = S.build(records, pairs, inferences, {}, (regs, folds), prompt_budget=None, control="stripped")
+    assert s["done"] == 2 and (s["primary"]["wins"], s["primary"]["losses"]) == (1, 1)
+    text = S.render(s, "test")
+    assert "去掉备用工具列表 vs 完整回执" in text and "基线" not in text
+
+
+def test_compared_arms_from_real_configs():
+    api = E.load_cfg(os.path.join(os.path.dirname(S.HERE), "agent_error", "configs", "e2_api.yaml"))["e2"]["runs"]
+    assert S.compared_arms(api["main"]) == ("baseline", "full")
+    assert S.compared_arms(api["p0"]) == ("baseline", "full")
+    assert S.compared_arms(api["stripped"]) == ("stripped", "full")
+    with pytest.raises(ValueError):
+        S.compared_arms({"arms": {"baseline": "off", "stripped": "stripped"}})

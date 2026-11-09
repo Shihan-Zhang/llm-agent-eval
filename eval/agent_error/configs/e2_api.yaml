@@ -37,6 +37,6 @@ e2:
   results_dir: "../../../external/agent_error/results/e2/api"
   runs:
     main:     {episodes: main,  arms: {baseline: "off", full: full}}       # ① 80 对,先跑这个
-    p0:       {episodes: p0,    arms: {baseline: "off", full: full}}       # ③ 同 80 题的 P0:回执会不会伤害无故障表现(暂不运行)
-    stripped: {episodes: main,  arms: {full: full, stripped: stripped}}  # ② 去掉备用工具列表的对照(暂不运行)
+    p0:       {episodes: p0,    arms: {baseline: "off", full: full}}       # ③ 同 80 题的 P0:回执会不会伤害无故障表现(scripts\run_e2_p0.bat)
+    stripped: {episodes: main,  arms: {full: full, stripped: stripped}}  # ② 去掉备用工具列表的对照(scripts\run_e2_stripped.bat);两组都重跑
     pilot:    {episodes: pilot, n: 5, arms: {baseline: "off", full: full}} # 清单之外 5 题,测 token 与耗时

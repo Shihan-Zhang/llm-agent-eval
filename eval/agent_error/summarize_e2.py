@@ -4,7 +4,8 @@
 只统计冻结清单(configs/e2_manifest.json)里该运行的配对;试跑目录与清单之外的记录不进入结果。
 每个(配对, 组)取最近一次尝试;只用两组都完成且没有 API 错误的配对。
 
-- 主要比较:配对完成率,基线 vs 完整回执,精确 McNemar(只看结果不一致的配对);另按层级 × 模式分表。
+- 主要比较:配对完成率,对照组 vs 完整回执(① ③ 的对照是基线,② 的对照是去掉备用工具列表),
+  精确 McNemar(只看结果不一致的配对)与配对差的区间;另按层级 × 模式分表。
 - 回执三分类(按工具结果):注入的故障(perturbation_status = perturbed)/ 工具返回错误(未注入但结果带
   非空 error 字段,含模型自己传错参数)/ 正常结果上的误报。报每类的结果数、回执数、触发率,
   以及回执里可选工具 ≥ 2 个的占比。
@@ -39,6 +40,18 @@ CLASS_NAMES = {"injected": "注入的故障", "tool_error": "工具返回错误"
 RESPONSES = ("retry", "switch", "other")
 RESPONSE_NAMES = {"retry": "重试原工具", "switch": "换用备用工具", "other": "其他"}
 BASELINE, TREATED = "baseline", "full"
+ARM_NAMES = {"baseline": "基线", "full": "完整回执", "stripped": "去掉备用工具列表"}
+
+
+def compared_arms(run_cfg: dict) -> tuple[str, str]:
+    """(对照组, 处理组)。处理组固定是完整回执;① ③ 的对照是基线,② 的对照是去掉备用工具列表的回执。"""
+    arms = list(run_cfg["arms"])
+    if len(arms) != 2 or TREATED not in arms:
+        raise ValueError(f"运行必须恰好两组且含 {TREATED!r},收到 {arms}")
+    control = next(a for a in arms if a != TREATED)
+    if control not in ARM_NAMES:
+        raise ValueError(f"未知的对照组 {control!r}")
+    return control, TREATED
 
 
 # ---------------------------------------------------------------- 轨迹与回执
@@ -121,13 +134,14 @@ def paired(rows: list[tuple[bool, bool]]) -> dict:
 
 
 def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, receipts: dict, folds_regs,
-          prompt_budget: int | None) -> dict:
-    """inferences[(pair, arm)] = 推理 JSON;receipts[(pair, attempt)] = 回执组该次尝试的回执记录列表。"""
+          prompt_budget: int | None, control: str = BASELINE) -> dict:
+    """inferences[(pair, arm)] = 推理 JSON;receipts[(pair, attempt)] = 完整回执组该次尝试的回执记录列表。
+    回执与反应只分析完整回执组(② 的对照组回执不带备用工具列表,"换用备用工具"无定义)。"""
     keys = {p.key: p for p in manifest_pairs}
     latest = {(r["pair"], r["arm"]): r for r in E.latest_records([r for r in records if r["pair"] in keys])}
     done, unresolved = [], []
     for k in keys:
-        rb, rt = latest.get((k, BASELINE)), latest.get((k, TREATED))
+        rb, rt = latest.get((k, control)), latest.get((k, TREATED))
         ok = rb and rt and rb["attempt"] == rt["attempt"] and rb["api_failures"] == 0 and rt["api_failures"] == 0
         (done if ok else unresolved).append(k)
     regs, folds = folds_regs
@@ -139,7 +153,7 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
     rows = []
     for k in done:
         p = keys[k]
-        x, y = bool(latest[(k, BASELINE)]["passed"]), bool(latest[(k, TREATED)]["passed"])
+        x, y = bool(latest[(k, control)]["passed"]), bool(latest[(k, TREATED)]["passed"])
         rows.append((x, y))
         strata[(p.tier, p.mode)].append((x, y))
         win = (not x) and y
@@ -173,18 +187,19 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
             "harness_errors": sum(bool(r.get("harness_error")) for r in eps),
             "primary": paired(rows), "strata": {s: paired(v) for s, v in sorted(strata.items())},
             "cls_n": cls_n, "cls_r": cls_r, "cls_ge2": cls_ge2, "resp_all": resp_all, "resp_win": resp_win,
-            "win_label": win_label, "overflow": overflow, "prompt_budget": prompt_budget}
+            "win_label": win_label, "overflow": overflow, "prompt_budget": prompt_budget, "control": control}
 
 
 def pct_ci(lo: float, hi: float) -> str:
     return f"[{max(-1.0, lo):.1%}, {min(1.0, hi):.1%}]"
 
 
-def diff_lines(p: dict) -> list[str]:
-    """配对差 δ = (胜 − 负)/n 的点估计与 95% 区间。"""
+def diff_lines(p: dict, cn: str = ARM_NAMES[BASELINE], tn: str = ARM_NAMES[TREATED]) -> list[str]:
+    """配对差 δ = (胜 − 负)/n 的点估计与 95% 区间;cn / tn = 对照组 / 处理组的名称。"""
     if not p["n"]:
         return []
-    out = [f"配对差 δ = (胜 − 负)/n = ({p['wins']} − {p['losses']})/{p['n']} = {p['diff']:.1%}(= 回执组完成率 − 基线完成率)。", ""]
+    out = [f"配对差 δ = (胜 − 负)/n = ({p['wins']} − {p['losses']})/{p['n']} = {p['diff']:.1%}"
+           f"(= {tn}组完成率 − {cn}组完成率)。", ""]
     if p["diff_wilson"] is not None:
         out += [f"- Wilson {pct_ci(*p['diff_wilson'])}:负 = 0 时 δ = 胜/n,取 Wilson(胜, n),"
                 f"即 (p̂ + z²/2n ± z·√(p̂(1−p̂)/n + z²/4n²)) / (1 + z²/n),p̂ = {p['wins']}/{p['n']},z = 1.96;"
@@ -196,22 +211,23 @@ def diff_lines(p: dict) -> list[str]:
 
 def render(s: dict, title: str) -> str:
     p = s["primary"]
+    cn, tn = ARM_NAMES[s["control"]], ARM_NAMES[TREATED]
     lines = [f"# {title}(由 eval/agent_error/summarize_e2.py 生成,勿手改)", "",
              "## 运行完整性", "",
              f"- 冻结清单配对 {s['n_manifest']} 对;两组都完成且无 API 错误 {s['done']} 对;未完成 {len(s['unresolved'])} 对"
              + (f"({', '.join(s['unresolved'][:10])})" if s["unresolved"] else ""),
              f"- 因 API 错误或中断整对重跑 {s['pair_reruns']} 次;最终回答含 \"Error during execution\" 的回合 "
              f"{s['error_in_answer']} 个(多为模型参数无法解析等非 API 原因);运行框架报错 {s['harness_errors']} 个", "",
-             "## 主要比较:配对完成率(基线 vs 完整回执)", "",
+             f"## 主要比较:配对完成率({cn} vs {tn})", "",
              "| 组 | 完成率 [95% Wilson] |", "|---|---|",
-             f"| 基线 | {rate(p['base'], p['n'])} |", f"| 完整回执 | {rate(p['treat'], p['n'])} |", "",
-             f"不一致配对:只有回执组完成(胜){p['wins']} 对,只有基线完成(负){p['losses']} 对;"
-             f"精确 McNemar 双侧 p = {p['p']:.3g}。", ""] + diff_lines(p) + [
-             "| 层级 | 模式 | 配对 | 基线 | 回执 | 胜 : 负 | p |", "|---|---|---|---|---|---|---|"]
+             f"| {cn} | {rate(p['base'], p['n'])} |", f"| {tn} | {rate(p['treat'], p['n'])} |", "",
+             f"不一致配对:只有{tn}组完成(胜){p['wins']} 对,只有{cn}组完成(负){p['losses']} 对;"
+             f"精确 McNemar 双侧 p = {p['p']:.3g}。", ""] + diff_lines(p, cn, tn) + [
+             f"| 层级 | 模式 | 配对 | {cn} | {tn} | 胜 : 负 | p |", "|---|---|---|---|---|---|---|"]
     for (tier, mode), q in s["strata"].items():
         lines.append(f"| {tier.upper()} | {mode} | {q['n']} | {q['base']} | {q['treat']} | {q['wins']} : {q['losses']} | {q['p']:.3g} |")
     total_r = sum(s["cls_r"].values())
-    lines += ["", "## 回执三分类(回执组全部工具结果)", "",
+    lines += ["", f"## 回执三分类({tn}组全部工具结果)", "",
               "| 类别 | 工具结果 | 回执 | 触发率 | 回执中可选工具 ≥ 2 |", "|---|---|---|---|---|"]
     for c in CLASSES:
         lines.append(f"| {CLASS_NAMES[c]} | {s['cls_n'][c]} | {s['cls_r'][c]} | {rate(s['cls_r'][c], s['cls_n'][c])} | "
@@ -271,7 +287,9 @@ def main() -> None:
         sys.exit(f"没有运行记录:{out}")
     e2 = cfg["e2"]
     budget = (e2["num_ctx"] - cfg["agent"]["max_tokens"]) if e2.get("num_ctx") else None
-    s = build(records, pairs, inferences, receipts, C.load(os.path.join(C.OUT, e2.get("registry", "gold"))), budget)
+    control, _ = compared_arms(e2["runs"][a.run])
+    s = build(records, pairs, inferences, receipts, C.load(os.path.join(C.OUT, e2.get("registry", "gold"))), budget,
+              control)
     src = "local" if e2.get("num_ctx") else "api"
     text = render(s, f"E2 {src} / {a.run}:{cfg['agent']['model']}")
     path = os.path.join(ROOT, "eval", "results", f"e2_{src}_{a.run}_summary.md")
