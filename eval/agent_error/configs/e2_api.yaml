@@ -38,5 +38,5 @@ e2:
   runs:
     main:     {episodes: main,  arms: {baseline: "off", full: full}}       # ① 80 对,先跑这个
     p0:       {episodes: p0,    arms: {baseline: "off", full: full}}       # ③ 同 80 题的 P0:回执会不会伤害无故障表现(scripts\run_e2_p0.bat)
-    stripped: {episodes: main,  arms: {full: full, stripped: stripped}}  # ② 去掉备用工具列表的对照(scripts\run_e2_stripped.bat);两组都重跑
+    stripped: {episodes: main_ext, arms: {full: full, stripped: stripped}}  # ② 去掉备用工具列表的对照(scripts\run_e2_stripped.bat);两组都重跑;200 对 = 主清单 80 + 补充清单 120
     pilot:    {episodes: pilot, n: 5, arms: {baseline: "off", full: full}} # 清单之外 5 题,测 token 与耗时

@@ -140,3 +140,33 @@ def test_compared_arms_from_real_configs():
     assert S.compared_arms(api["stripped"]) == ("stripped", "full")
     with pytest.raises(ValueError):
         S.compared_arms({"arms": {"baseline": "off", "stripped": "stripped"}})
+
+
+def test_main_summarizes_stripped_run_against_stripped_arm(tmp_path, monkeypatch):
+    """回归:main() 原先不把对照组传给 build,默认找 baseline,② 的 80 对全被判为未完成。"""
+    import json
+    pairs = E.pairs_for("main", S.M.load())[:2]
+    out = tmp_path / "res" / "stripped"
+    traj = {"messages": [call(1, "book"), res(1, "book", {"ok": 1})]}
+    recs = []
+    for p, (s_pass, f_pass) in zip(pairs, [(False, True), (False, False)]):
+        for arm, passed in (("stripped", s_pass), ("full", f_pass)):
+            recs.append(_record(p.key, arm, passed, tier=p.tier))
+            d = out / arm / "m" / "fc" / p.tier / "inferences"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / f"{p.key}_inference.json").write_text(json.dumps(traj), encoding="utf-8")
+    (out / "episodes.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs), encoding="utf-8")
+    (out / "receipts.jsonl").write_text("", encoding="utf-8")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(json.dumps({"agent": {"model": "m", "max_tokens": 100}, "e2": {
+        "results_dir": str(tmp_path / "res"),
+        "runs": {"stripped": {"episodes": "main", "arms": {"full": "full", "stripped": "stripped"}}}}}),
+        encoding="utf-8")
+    (tmp_path / "eval" / "results").mkdir(parents=True)
+    monkeypatch.setattr(S, "ROOT", str(tmp_path))
+    monkeypatch.setattr(S.C, "load", lambda path: ([{} for _ in range(5)], {p.task_id: 0 for p in pairs}))
+    monkeypatch.setattr(sys, "argv", ["summarize_e2.py", "--config", str(cfg), "--run", "stripped"])
+    S.main()
+    text = (tmp_path / "eval" / "results" / "e2_api_stripped_summary.md").read_text(encoding="utf-8")
+    assert "两组都完成且无 API 错误 2 对" in text
+    assert "只有完整回执组完成(胜)1 对" in text

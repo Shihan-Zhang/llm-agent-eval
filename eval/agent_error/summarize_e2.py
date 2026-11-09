@@ -259,8 +259,7 @@ def load_run(cfg: dict, cfg_path: str, run: str) -> tuple[str, list[dict], dict,
     e2 = cfg["e2"]
     out = os.path.abspath(os.path.join(os.path.dirname(cfg_path), e2["results_dir"], run))
     records = E.read_records(os.path.join(out, "episodes.jsonl"))
-    with open(M.OUT, encoding="utf-8") as fh:
-        pairs = E.pairs_for(e2["runs"][run]["episodes"], json.load(fh))
+    pairs = E.pairs_for(e2["runs"][run]["episodes"], M.load())
     model = cfg["agent"]["model"].replace("/", "_").replace(":", "_")
     inferences = {}
     for r in E.latest_records(records):

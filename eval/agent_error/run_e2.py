@@ -4,7 +4,7 @@ E2 编排:按配对随机交错运行基线组与回执组,可中断续跑,API �
     python eval/agent_error/run_e2.py --config eval/agent_error/configs/e2_api.yaml --run pilot
     python eval/agent_error/run_e2.py --config eval/agent_error/configs/e2_api.yaml --run pilot --estimate main
 
-- 回合清单来自冻结的 configs/e2_manifest.json:main = C3/C4 × P3/P4 的 80 个工作流;p0 = 同 80 题的 P0;
+- 回合清单来自冻结的 configs/e2_manifest.json:main = C3/C4 × P3/P4 的 80 个工作流;main_ext = main + ② 的补充清单 120(configs/e2_manifest_ext.json);p0 = 同 80 题的 P0;
   c1 = C1 补充;pilot = 清单之外的 C3/C4 P3/P4 题(按层级与模式轮流抽,种子固定),不与正式实验重叠。
 - 顺序:配对顺序与每对内两组的先后都由种子打乱,写入 order.json;workers 个配对并行。
 - 组(arm):off = 基线(不检查);full = 完整回执;stripped = 去掉备用工具列表的回执。
@@ -87,6 +87,8 @@ def pairs_for(group: str, manifest: dict, available: dict[str, list[str]] | None
               seed: int = 0) -> list[Pair]:
     if group == "main":
         return [Pair(e["tier"], e["task_id"], e["mode"]) for e in manifest["main"]]
+    if group == "main_ext":                          # ② 200 对:主清单 80 + 补充清单 120
+        return [Pair(e["tier"], e["task_id"], e["mode"]) for e in manifest["main"] + manifest[M.EXT_KEY]]
     if group == "p0":
         return [Pair(e["tier"], e["task_id"], "P0") for e in manifest["main"]]
     if group == "c1":
@@ -153,13 +155,12 @@ class Runner:
         self.workers = e2.get("workers", 1)
         self.regs, self.folds = C.load(os.path.join(C.OUT, e2.get("registry", "gold")))
         self.subs = R.build_subs(os.path.join(T.TM, "tools", "definitions"))
-        with open(M.OUT, encoding="utf-8") as fh:
-            manifest = json.load(fh)
+        manifest = M.load()
         available = {t: M.tasks_with_modes(T.TM, t) for t in M.MAIN_TIERS}
         self.pairs = pairs_for(spec["episodes"], manifest, available, spec.get("n", 5), e2["seed"] + 1)
         self.plan = plan_order(self.pairs, list(self.arms), e2["seed"])
         with open(os.path.join(self.out, "order.json"), "w", encoding="utf-8") as fh:
-            json.dump({"seed": e2["seed"], "manifest_sha256": M.digest(manifest),
+            json.dump({"seed": e2["seed"], **M.hashes(manifest),
                        "order": [{**asdict(p), "arms": a} for p, a in self.plan]}, fh, indent=1)
         self.lock = threading.Lock()
         self.reruns = 0
@@ -304,8 +305,7 @@ def main() -> None:
     if a.estimate:
         e2 = cfg["e2"]
         target = e2["runs"][a.estimate]
-        with open(M.OUT, encoding="utf-8") as fh:
-            n_pairs = len(pairs_for(target["episodes"], json.load(fh), n=target.get("n", 5)))
+        n_pairs = len(pairs_for(target["episodes"], M.load(), n=target.get("n", 5)))
         est = estimate(latest_records(read_records(runner.records_path)), n_pairs, list(runner.arms),
                        e2.get("workers", 1), (cfg.get("patch") or {}).get("rate_limit"), e2.get("price_usd_per_m"),
                        e2.get("num_ctx"), cfg["agent"].get("max_tokens"))

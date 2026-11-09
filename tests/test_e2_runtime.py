@@ -305,7 +305,7 @@ def test_real_configs_have_valid_arms_and_groups(name):
     for run, spec in cfg["e2"]["runs"].items():
         variants = {a: E.arm_variant(v) for a, v in spec["arms"].items()}
         assert set(variants.values()) <= {None, "full", "stripped"}, run
-        assert spec["episodes"] in {"main", "p0", "c1", "pilot"}, run
+        assert spec["episodes"] in {"main", "main_ext", "p0", "c1", "pilot"}, run
     assert {"main", "pilot"} <= set(cfg["e2"]["runs"])
     assert cfg["agent"]["temperature"] == 0
 
