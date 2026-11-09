@@ -7,6 +7,8 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 Start-Transcript -Path (Join-Path $Logs "e2_v2_main.log") -Append | Out-Null
 if (-not $env:SILICONFLOW_API_KEY) { throw ".env 里的 SILICONFLOW_API_KEY 为空" }
+& $Py (Join-Path $Root "eval\agent_error\check_prediction.py") (Join-Path $Root "eval\results\predictions.md") "① v2"
+if ($LASTEXITCODE -ne 0) { throw "predictions.md 里没有 ① v2 的预测,拒绝启动" }
 
 Step "1. 版本记录"
 VersionInfo
