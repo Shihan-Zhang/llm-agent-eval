@@ -89,6 +89,8 @@ def pairs_for(group: str, manifest: dict, available: dict[str, list[str]] | None
         return [Pair(e["tier"], e["task_id"], e["mode"]) for e in manifest["main"]]
     if group == "main_ext":                          # ② 200 对:主清单 80 + 补充清单 120
         return [Pair(e["tier"], e["task_id"], e["mode"]) for e in manifest["main"] + manifest[M.EXT_KEY]]
+    if group == "ext":                               # 只取补充清单 120 对(与 main 合起来 = main_ext)
+        return [Pair(e["tier"], e["task_id"], e["mode"]) for e in manifest[M.EXT_KEY]]
     if group == "p0":
         return [Pair(e["tier"], e["task_id"], "P0") for e in manifest["main"]]
     if group == "c1":

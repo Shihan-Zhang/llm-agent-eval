@@ -45,5 +45,6 @@ e2:
   tag: api_v2                          # 汇总文件名 e2_api_v2_<run>_summary.md
   runs:
     main:     {episodes: main,  arms: {baseline: "off", full: full}}       # ① 80 对,先跑这个
+    main_supp: {episodes: ext,  arms: {baseline: "off", full: full}}       # ① 补充清单 120 对,与 main 合起来 200 对;结果写 main_supp(scripts\run_e2_main_supp.bat)
     p0:       {episodes: p0,    arms: {baseline: "off", full: full}}       # ③ 同 80 题的 P0:回执会不会伤害无故障表现(scripts\run_e2_p0.bat)
     stripped: {episodes: main_ext, arms: {full: full, stripped: stripped}}  # ② 去掉备用工具列表的对照(scripts\run_e2_stripped.bat);两组都重跑;200 对 = 主清单 80 + 补充清单 120

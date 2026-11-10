@@ -329,7 +329,7 @@ def test_real_configs_have_valid_arms_and_groups(name):
     for run, spec in cfg["e2"]["runs"].items():
         variants = {a: E.arm_variant(v) for a, v in spec["arms"].items()}
         assert set(variants.values()) <= {None, "full", "stripped"}, run
-        assert spec["episodes"] in {"main", "main_ext", "p0", "c1", "pilot"}, run
+        assert spec["episodes"] in {"main", "main_ext", "ext", "p0", "c1", "pilot"}, run
     assert "main" in cfg["e2"]["runs"]
     assert cfg["agent"]["temperature"] == 0
 
@@ -342,6 +342,8 @@ def test_v2_config_differs_from_old_only_in_schema_patch_and_output():
     for d in (old, new):
         d["e2"].pop("results_dir")
     old["e2"]["runs"].pop("pilot")
+    # ① v2 补充:补充清单 120 对,与 main 同样的两组,结果写在单独的 main_supp 目录
+    assert new["e2"]["runs"].pop("main_supp") == {"episodes": "ext", "arms": new["e2"]["runs"]["main"]["arms"]}
     assert new == old
 
 

@@ -63,3 +63,7 @@ def test_frozen_files_in_repo():
     assert M.hashes(m) == {"manifest_sha256": "8d43264736a91674342f3a828a9fe9d511df8b2314b7e48af6d31be38916936d",
                            "ext_sha256": "eb47ca3ac1b8d419d901e06989d2e8ad671a878ba68cd3aae184d6bb429f4632"}
     assert len(E.pairs_for("main_ext", m)) == 200
+    ext, main = E.pairs_for("ext", m), E.pairs_for("main", m)
+    assert len(ext) == len({p.key for p in ext}) == 120              # ① v2 补充:只跑补充清单
+    assert not {p.key for p in ext} & {p.key for p in main}
+    assert sorted(p.key for p in main + ext) == sorted(p.key for p in E.pairs_for("main_ext", m))
