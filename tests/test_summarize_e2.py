@@ -117,6 +117,80 @@ def test_render_shows_paired_difference():
     assert "13.8%" in text and "Wilson [7.9%, 23.0%]" in text and "Newcombe 方法 10 [6.3%, 23.0%]" in text
 
 
+def test_pass_hat_k_unbiased_estimator():
+    from fractions import Fraction
+    assert S.pass_hat_k(6, 10, 4) == Fraction(15, 210)              # C(6,4)/C(10,4)
+    assert S.pass_hat_k(0, 10, 3) == 0                               # c = 0
+    assert S.pass_hat_k(10, 10, 3) == 1 and S.pass_hat_k(5, 5, 5) == 1   # c = n
+    assert S.pass_hat_k(3, 10, 4) == 0                               # c < k:不可能 k 次全过
+    assert S.pass_hat_k(7, 10, 1) == Fraction(7, 10)                 # k = 1 就是完成率
+    for c, n, k in ((3, 3, 4), (0, 2, 3)):                           # k > n
+        with pytest.raises(ValueError):
+            S.pass_hat_k(c, n, k)
+    for c, n, k in ((1, 3, 0), (4, 3, 2), (-1, 3, 1)):               # k < 1、c 越界
+        with pytest.raises(ValueError):
+            S.pass_hat_k(c, n, k)
+
+
+def test_flip_rate_is_mean_pairwise_disagreement():
+    from fractions import Fraction
+    # 每题:两两比较中结果不同的比例 2c(n−c)/(n(n−1)):0、1、2·1·2/(3·2) = 2/3
+    items = [[True, True], [True, False], [False, False, True]]
+    assert S.flip_rate(items) == (0 + 1 + Fraction(2, 3)) / 3
+    assert S.flip_rate([[True], [False, False]]) == 0                # n < 2 的题不计入
+    assert S.flip_rate([[True], [False]]) is None                    # 没有任何一题跑过两次
+
+
+def test_repeat_summary_k1_withholds_pass_k_and_flip():
+    r = S.repeat_summary([[True], [False], [True]])
+    assert r == {"k": 1, "k_max": 1, "pass_k": None, "flip": None}
+    r2 = S.repeat_summary([[True, True], [True, False], [False, False, False]])
+    assert r2["k"] == 2 and r2["k_max"] == 3
+    assert r2["pass_k"] == (1 + 0 + 0) / S.Fraction(3)               # 公共 k = 2:C(2,2)/C(2,2)、C(1,2)、C(0,2)/C(3,2)
+
+
+def _two_pair_records(second_attempt_valid):
+    recs = [_record("C3_task_001_P3", "baseline", False), _record("C3_task_001_P3", "full", True),
+            _record("C3_task_002_P3", "baseline", True), _record("C3_task_002_P3", "full", True)]
+    if second_attempt_valid:                                         # 同一配对两组都再跑一次、都无 API 错误
+        recs += [_record("C3_task_001_P3", "baseline", True, attempt=2), _record("C3_task_001_P3", "full", True, attempt=2),
+                 _record("C3_task_002_P3", "baseline", True, attempt=2), _record("C3_task_002_P3", "full", False, attempt=2)]
+    return recs
+
+
+def _build_two_pairs(records):
+    pairs = [E.Pair("c3", "C3_task_001", "P3"), E.Pair("c3", "C3_task_002", "P3")]
+    traj = {"messages": [call(1, "book"), res(1, "book", {"ok": 1})]}
+    inferences = {(p.key, "full"): traj for p in pairs}
+    return S.build(records, pairs, inferences, {}, ([{} for _ in range(5)], {"C3_task_001": 0, "C3_task_002": 1}),
+                   prompt_budget=None)
+
+
+def test_report_k1_shows_k_column_and_reason_without_pass_k():
+    s = _build_two_pairs(_two_pair_records(False))
+    assert s["repeats"]["baseline"]["k"] == 1 and s["repeats"]["full"]["pass_k"] is None
+    text = S.render(s, "test")
+    assert "| 组 | 完成率 [95% Wilson] | 每题重复次数 k | pass^k |" in text
+    assert "| 基线 | 1/2 = 50.0%" in text and "| 1 | — |" in text
+    assert "k = 1" in text and "不输出 pass^k" in text and "翻转率" in text
+
+
+def test_report_k2_shows_pass_k_and_flip_rate():
+    s = _build_two_pairs(_two_pair_records(True))
+    rb, rf = s["repeats"]["baseline"], s["repeats"]["full"]
+    assert (rb["k"], rb["pass_k"], rb["flip"]) == (2, S.Fraction(1, 2), S.Fraction(1, 2))   # 001: F,T;002: T,T
+    assert (rf["k"], rf["pass_k"], rf["flip"]) == (2, S.Fraction(1, 2), S.Fraction(1, 2))   # 001: T,T;002: T,F
+    text = S.render(s, "test")
+    assert "| 2 | 50.0% |" in text and "重跑翻转率" in text and "不输出 pass^k" not in text
+
+
+def test_attempt_with_api_failure_is_not_a_repeat():
+    recs = _two_pair_records(False) + [_record("C3_task_001_P3", "baseline", True, attempt=2),
+                                       _record("C3_task_001_P3", "full", True, attempt=2, fail=1)]
+    s = _build_two_pairs(recs)
+    assert s["repeats"]["baseline"]["k"] == 1                       # 第 2 次尝试回执组有 API 错误,整次不算
+
+
 def test_stripped_run_compares_full_against_stripped():
     pairs = [E.Pair("c3", "C3_task_001", "P3"), E.Pair("c3", "C3_task_002", "P3")]
     records = [

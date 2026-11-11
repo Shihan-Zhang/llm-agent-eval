@@ -19,6 +19,8 @@
   去掉这些配对重算主要比较。
 - 管线:order.json 里有没有 bare_object_additional_properties(工具 schema 补丁,toolmaze_run 第 7 条);
   另按组统计推理文件里顶层无属性 object 参数传空({}、""、null)/ 非空对象 / 其他的次数。
+- 重复运行:主表加「每题重复次数 k」一栏(只算两组都没有 API 错误的尝试)。k ≥ 2 时报 pass^k 的无偏估计
+  C(c,k)/C(n,k)(每题平均)和重跑翻转率(每题 2c(n−c)/(n(n−1)) 取平均);k = 1 时两项都不输出并写明原因。
 - 复现性(① 以外的运行):完整回执组与 ① 的完整回执组在共同配对上逐对比较,报一致率、Cohen κ、正一致率 PA 和 2×2 表。
 
 用法:python eval/agent_error/summarize_e2.py --config eval/agent_error/configs/e2_api.yaml --run main
@@ -31,6 +33,7 @@ import math
 import os
 import sys
 from collections import Counter, defaultdict
+from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -140,6 +143,48 @@ def paired(rows: list[tuple[bool, bool]]) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- 重复运行:pass^k 与重跑翻转率
+def pass_hat_k(c: int, n: int, k: int) -> Fraction:
+    """同一题跑 n 次、通过 c 次时,"k 次独立运行全部通过"概率的无偏估计 C(c,k)/C(n,k)(c < k 时为 0)。"""
+    if not 1 <= k <= n:
+        raise ValueError(f"需要 1 ≤ k ≤ n,收到 k = {k}、n = {n}")
+    if not 0 <= c <= n:
+        raise ValueError(f"需要 0 ≤ c ≤ n,收到 c = {c}、n = {n}")
+    return Fraction(math.comb(c, k), math.comb(n, k))
+
+
+def flip_rate(items: list[list[bool]]) -> Fraction | None:
+    """重跑翻转率:同一题两次独立运行结果不同的概率。每题的无偏估计是两两比较中不同的比例 2c(n−c)/(n(n−1)),
+    再对至少跑过两次的题取平均;没有这样的题时无定义(None)。"""
+    rates = [Fraction(2 * sum(o) * (len(o) - sum(o)), len(o) * (len(o) - 1)) for o in items if len(o) >= 2]
+    return sum(rates, Fraction(0)) / len(rates) if rates else None
+
+
+def repeat_summary(items: list[list[bool]]) -> dict:
+    """items = 每题各次运行的通过与否。k = 各题重复次数的最小值(pass^k 用公共的 k);k = 1 时两项都不输出。"""
+    k = min(len(o) for o in items)
+    out = {"k": k, "k_max": max(len(o) for o in items), "pass_k": None, "flip": None}
+    if k >= 2:
+        out["pass_k"] = sum((pass_hat_k(sum(o), len(o), k) for o in items), Fraction(0)) / len(items)
+        out["flip"] = flip_rate(items)
+    return out
+
+
+def repeat_outcomes(records: list[dict], done: list[str], arms: tuple[str, str]) -> dict[str, list[list[bool]]]:
+    """每组、每个完成配对的各次有效运行:只算两组都没有 API 错误的尝试(一次尝试 = 两组各跑一遍)。"""
+    by_attempt = defaultdict(dict)
+    done_set = set(done)
+    for r in records:
+        if r["pair"] in done_set and r["api_failures"] == 0:
+            by_attempt[(r["pair"], r["attempt"])][r["arm"]] = bool(r["passed"])
+    out = {arm: defaultdict(list) for arm in arms}
+    for (pair, _), res in sorted(by_attempt.items()):
+        if all(a in res for a in arms):
+            for arm in arms:
+                out[arm][pair].append(res[arm])
+    return {arm: [out[arm][p] for p in sorted(out[arm])] for arm in arms}
+
+
 def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, receipts: dict, folds_regs,
           prompt_budget: int | None, control: str = BASELINE) -> dict:
     """inferences[(pair, arm)] = 推理 JSON;receipts[(pair, attempt)] = 完整回执组该次尝试的回执记录列表。
@@ -190,7 +235,8 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
         overflow = sorted((r["pair"], r["arm"], r["max_prompt_tokens"]) for r in latest.values()
                           if r["pair"] in keys and r["max_prompt_tokens"] > prompt_budget)
     eps = [r for r in latest.values() if r["pair"] in keys]
-    return {"n_manifest": len(keys), "done": len(done), "unresolved": sorted(unresolved),
+    reps = repeat_outcomes(records, done, (control, TREATED))
+    return {"repeats": {arm: repeat_summary(items) for arm, items in reps.items() if items},"n_manifest": len(keys), "done": len(done), "unresolved": sorted(unresolved),
             "pair_reruns": E.pair_reruns([r for r in records if r["pair"] in keys]),
             "error_in_answer": sum(r["error_in_answer"] for r in eps),
             "harness_errors": sum(bool(r.get("harness_error")) for r in eps),
@@ -253,6 +299,32 @@ def pipeline_lines(pl: dict | None) -> list[str]:
     return out
 
 
+def fraction_pct(x: Fraction | None) -> str:
+    return "—" if x is None else f"{float(x):.1%}"
+
+
+def repeat_cells(s: dict, arm: str) -> str:
+    r = (s.get("repeats") or {}).get(arm)
+    if not r:
+        return "— | —"
+    k = str(r["k"]) if r["k"] == r["k_max"] else f"{r['k']}(最多 {r['k_max']})"
+    return f"{k} | {fraction_pct(r['pass_k'])}"
+
+
+def repeat_lines(s: dict, cn: str, tn: str) -> list[str]:
+    reps = s.get("repeats") or {}
+    if not reps:
+        return []
+    if all(r["k"] == 1 for r in reps.values()):
+        return ["k = 1:每个配对每组只有一次有效运行。pass^k 的无偏估计 C(c,k)/C(n,k) 在 k = 1 时就等于完成率本身,"
+                "重跑翻转率需要同一题至少两次独立运行,所以不输出 pass^k 和翻转率。", ""]
+    names = {s["control"]: cn, TREATED: tn}
+    flips = ",".join(f"{names[a]} {fraction_pct(r['flip'])}" for a, r in reps.items())
+    return ["pass^k = 每题 C(c,k)/C(n,k) 的平均(n = 该题有效运行次数,c = 通过次数,k = 各题公共的最小重复次数),"
+            "估计「同一题连续 k 次都通过」的概率;只算两组都没有 API 错误的尝试。",
+            f"重跑翻转率(同一题两次独立运行结果不同的概率,每题 2c(n−c)/(n(n−1)) 取平均):{flips}。", ""]
+
+
 def render(s: dict, title: str) -> str:
     p = s["primary"]
     cn, tn = ARM_NAMES[s["control"]], ARM_NAMES[TREATED]
@@ -264,8 +336,10 @@ def render(s: dict, title: str) -> str:
              f"{s['error_in_answer']} 个(多为模型参数无法解析等非 API 原因);运行框架报错 {s['harness_errors']} 个",
              *pipeline_lines(s.get("pipeline")), "",
              f"## 主要比较:配对完成率({cn} vs {tn})", "",
-             "| 组 | 完成率 [95% Wilson] |", "|---|---|",
-             f"| {cn} | {rate(p['base'], p['n'])} |", f"| {tn} | {rate(p['treat'], p['n'])} |", "",
+             "| 组 | 完成率 [95% Wilson] | 每题重复次数 k | pass^k |", "|---|---|---|---|",
+             f"| {cn} | {rate(p['base'], p['n'])} | {repeat_cells(s, s['control'])} |",
+             f"| {tn} | {rate(p['treat'], p['n'])} | {repeat_cells(s, TREATED)} |", "",
+             *repeat_lines(s, cn, tn),
              f"不一致配对:只有{tn}组完成(胜){p['wins']} 对,只有{cn}组完成(负){p['losses']} 对;"
              f"精确 McNemar 双侧 p = {p['p']:.3g}。", ""] + diff_lines(p, cn, tn) + [
              f"| 层级 | 模式 | 配对 | {cn} | {tn} | 胜 : 负 | p |", "|---|---|---|---|---|---|---|"]
