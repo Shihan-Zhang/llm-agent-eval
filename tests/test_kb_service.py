@@ -117,6 +117,20 @@ def test_rate_limit_returns_429_with_retry_after_and_recovers():
     assert post(c).status_code == 200
 
 
+def test_rate_30_per_min_burst_of_31_then_retry_at_10s():
+    clock = FakeClock()
+    c = make_client(rate=30, clock=clock)
+    codes = [post(c) for _ in range(31)]                           # 时钟不动 = 0 秒内连发
+    assert [r.status_code for r in codes[:30]] == [200] * 30
+    retry_after = codes[30].headers["Retry-After"]
+    print(f"\n第 31 个:{codes[30].status_code},Retry-After = {retry_after}")
+    assert codes[30].status_code == 429 and retry_after == "2"     # 补 1 个需 60/30 = 2 秒
+    clock.t += 10                                                  # 10 秒补 10 × 30/60 = 5 个
+    r = post(c)
+    print(f"第 10 秒再发:{r.status_code}")
+    assert r.status_code == 200
+
+
 def test_rate_limit_is_exact_under_20_concurrent_requests():
     c = make_client(rate=10)                                       # 假时钟不走:不会补充额度
     barrier, codes, lock = threading.Barrier(20), [], threading.Lock()
@@ -209,6 +223,27 @@ def test_log_has_request_id_duration_count_but_no_query_or_text(caplog):
     assert any(x["path"] == "/search/stream" and x["results"] == 1 for x in recs)
     assert SECRET_QUERY not in caplog.text and "私密" not in caplog.text
     assert all(ch["text"] not in caplog.text for ch in CHUNKS)
+
+
+class ExplodingRetriever:
+    chunks = CHUNKS
+
+    def search_scored(self, query, k, mode):
+        raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("path", ["/search", "/search/stream"])
+def test_unhandled_exception_is_still_logged_as_500(caplog, path):
+    caplog.set_level(logging.INFO, logger="kb_service")
+    settings = Settings(api_keys=frozenset({KEY}), rate_per_min=100, embed_timeout_s=5)
+    c = TestClient(create_app(ExplodingRetriever(), settings, clock=FakeClock()), raise_server_exceptions=False)
+    r = post(c, path, headers={"X-Request-ID": "boom-1"})
+    assert r.status_code == 500
+    recs = [json.loads(m) for m in caplog.messages if m.startswith("{")]
+    line = next(x for x in recs if x.get("request_id") == "boom-1")
+    assert line["path"] == path and line["status"] == 500 and line["results"] is None
+    assert isinstance(line["duration_ms"], float)
+    assert SECRET_QUERY not in caplog.text
 
 
 # ---------------------------------------------------------------- 工具 schema

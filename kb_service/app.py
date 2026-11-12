@@ -124,12 +124,16 @@ def create_app(retriever: ScoredRetriever, settings: Settings, clock: Callable[[
         request.state.request_id = given if REQUEST_ID.match(given) else uuid.uuid4().hex
         request.state.result_count = None
         t0 = time.perf_counter()
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.request_id
-        log.info(json.dumps({"request_id": request.state.request_id, "path": request.url.path,
-                             "status": response.status_code,
-                             "duration_ms": round((time.perf_counter() - t0) * 1000, 2),
-                             "results": request.state.result_count}, ensure_ascii=False))
+        status = 500                                   # 路由抛出未处理异常时按 500 记,异常照常向外抛
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers["X-Request-ID"] = request.state.request_id
+        finally:
+            log.info(json.dumps({"request_id": request.state.request_id, "path": request.url.path,
+                                 "status": status,
+                                 "duration_ms": round((time.perf_counter() - t0) * 1000, 2),
+                                 "results": request.state.result_count}, ensure_ascii=False))
         return response
 
     def authorize(x_api_key: str | None = Header(None)) -> str:
