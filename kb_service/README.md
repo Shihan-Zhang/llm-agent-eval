@@ -16,7 +16,7 @@
 
 1. `.env` 里设置 `KB_SERVICE_API_KEYS`(见 `.env.example`,为空时拒绝启动);
 2. 有建好的索引(`python -m rag.index`)且 Ollama 在运行;
-3. 双击 `scripts\run_kb_service.bat`,请求日志写 `external\logs\kb_service.log`。
+3. 双击 `scripts\run_kb_service.bat`,请求日志写 `external\logs\kb_service.log`(暂未轮转,会一直追加)。
 
 ## 接口
 
@@ -48,7 +48,8 @@
   (包括 `/health`)。
 - **限流**:每个 Key 一个令牌桶,容量 = 每分钟限额(允许的突发),按秒匀速补充;桶的读写在一把
   `threading.Lock` 里(线程池里的路由会并发调用)。测试:20 个线程同时请求、限额 10,恰好 10 个 200、10 个 429。
-  状态只在内存里,单进程够用,重启清零。不复用 `eval/agent_error/ratelimit.py`:那是调用方的限速器
+  状态只在内存里,单进程够用,重启清零。**这是单进程方案(内存令牌桶加锁);多实例部署时各进程的桶互不相通,
+  应改用 Redis 原子操作(如 Lua 脚本或 INCR + EXPIRE)或在网关层限流。**不复用 `eval/agent_error/ratelimit.py`:那是调用方的限速器
   (额度不够就 sleep 等待,同时管 token 和请求两种预算),服务端需要立刻拒绝并返回 `Retry-After`;
   它也不在包里,服务不应依赖实验脚本目录。
 - **SSE 先算完再推送**:检索一次就出全部结果,出错时照常返回 503 / 504,不会推到一半断掉。
