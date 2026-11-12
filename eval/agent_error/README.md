@@ -257,6 +257,9 @@ scripts\run_e2_local.bat     本地 qwen3i-8k:同 80 对,日志 external\logs\e2
 工具执行与判分不变;`order.json` 记下是否打了补丁。按 ① → ③ → ② 重跑(`scripts\run_e2_main.bat`、
 `run_e2_p0.bat`、`run_e2_stripped.bat`),每次运行前先写预测(`check_prediction.py` 在启动前检查)。
 ① v2 扩到 200 对时,补充清单 120 对单独跑 `main_supp`(回合组 `ext`,`scripts\run_e2_main_supp.bat`),结果写 `e2/api_v2/main_supp`。
+200 对合并汇总:`summarize_e2_combined.py --config configs/e2_api_v2.yaml --runs main,main_supp --name main200`
+→ `eval/results/e2_api_v2_main200_summary.md`(按清单与层级 × 模式分层、两部分效果一致性的 Fisher 检验;
+扩样是看到 80 对结果之后决定的,合计 p 按两次检验做 Bonferroni 校正)。
 规则层对照新旧管线:`judge/compare.py` → `eval/results/e2_judge_compare.md`(L3 之前只给上下界)。
 
 **两篇论文会不会也有这个问题**(只读论文和上游代码,未调用):
