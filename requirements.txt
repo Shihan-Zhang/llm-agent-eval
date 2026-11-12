@@ -25,4 +25,10 @@ typing_extensions==4.16.0
 numpy
 jieba
 rank_bm25
+# 知识库检索服务 kb_service(FastAPI;测试用的 TestClient 走上面的 httpx2)
+fastapi==0.162.5
+starlette==1.10.0
+annotated-doc==0.0.5
+uvicorn==0.54.0
+click==8.5.0
 # 重排(下一步):sentence-transformers

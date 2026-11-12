@@ -35,12 +35,13 @@ def _post(path, body, timeout=600):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def embed(texts, model="bge-m3", cpu=False, keep_alive="5m"):
-    """返回 [len(texts), dim] 的 float32 矩阵,逐行归一化。"""
+def embed(texts, model="bge-m3", cpu=False, keep_alive="5m", timeout=600):
+    """返回 [len(texts), dim] 的 float32 矩阵,逐行归一化。timeout(秒)默认按建索引的大批量取;
+    在线检索(kb_service)传短的超时。连不上抛 URLError / ConnectionError,超时抛 TimeoutError。"""
     body = {"model": model, "input": texts, "keep_alive": keep_alive}
     if cpu:
         body["options"] = {"num_gpu": 0}           # 0 层放 GPU,即全部在 CPU 上算
-    vecs = np.asarray(_post("/api/embed", body)["embeddings"], dtype=np.float32)
+    vecs = np.asarray(_post("/api/embed", body, timeout=timeout)["embeddings"], dtype=np.float32)
     if vecs.ndim != 2 or len(vecs) != len(texts):
         raise ValueError(f"embedding 形状异常:{vecs.shape},期望 ({len(texts)}, dim)")
     norms = np.linalg.norm(vecs, axis=1, keepdims=True)
