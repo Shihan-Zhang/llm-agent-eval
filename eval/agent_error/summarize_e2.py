@@ -1,10 +1,12 @@
 """
-汇总 E2 一次运行(如 API ① 或本地 main),写 eval/results/e2_<api|local>_<run>_summary.md。
+汇总 E2 一次运行(如 API ① 或本地 main),写 eval/results/e2_<tag>_<run>_summary.md
+(tag 取配置 e2.tag,默认 api / local)。
 
 只统计冻结清单(configs/e2_manifest.json)里该运行的配对;试跑目录与清单之外的记录不进入结果。
 每个(配对, 组)取最近一次尝试;只用两组都完成且没有 API 错误的配对。
 
-- 主要比较:配对完成率,基线 vs 完整回执,精确 McNemar(只看结果不一致的配对);另按层级 × 模式分表。
+- 主要比较:配对完成率,对照组 vs 完整回执(① ③ 的对照是基线,② 的对照是去掉备用工具列表),
+  精确 McNemar(只看结果不一致的配对)与配对差的区间;另按层级 × 模式分表。
 - 回执三分类(按工具结果):注入的故障(perturbation_status = perturbed)/ 工具返回错误(未注入但结果带
   非空 error 字段,含模型自己传错参数)/ 正常结果上的误报。报每类的结果数、回执数、触发率,
   以及回执里可选工具 ≥ 2 个的占比。
@@ -13,6 +15,13 @@
 - 回执与轨迹对齐:用同一份注册表重新检查回执组轨迹里的每个工具结果(检查是确定性的),
   被标记的结果按顺序与 receipts.jsonl 的记录一一对应;工具名对不上即报错。
 - 本地模型:列出单次请求最大输入超过 num_ctx − max_tokens 的回合(Ollama 超出上下文时静默截断)。
+- 敏感性分析:本运行里有试跑(<e2.pilot_results_dir,默认 results_dir>/pilot/order.json)用过的任务时,
+  去掉这些配对重算主要比较。
+- 管线:order.json 里有没有 bare_object_additional_properties(工具 schema 补丁,toolmaze_run 第 7 条);
+  另按组统计推理文件里顶层无属性 object 参数传空({}、""、null)/ 非空对象 / 其他的次数。
+- 重复运行:主表加「每题重复次数 k」一栏(只算两组都没有 API 错误的尝试)。k ≥ 2 时报 pass^k 的无偏估计
+  C(c,k)/C(n,k)(每题平均)和重跑翻转率(每题 2c(n−c)/(n(n−1)) 取平均);k = 1 时两项都不输出并写明原因。
+- 复现性(① 以外的运行):完整回执组与 ① 的完整回执组在共同配对上逐对比较,报一致率、Cohen κ、正一致率 PA 和 2×2 表。
 
 用法:python eval/agent_error/summarize_e2.py --config eval/agent_error/configs/e2_api.yaml --run main
 """
@@ -24,6 +33,7 @@ import math
 import os
 import sys
 from collections import Counter, defaultdict
+from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -32,6 +42,7 @@ sys.path.insert(0, os.path.join(ROOT, "eval", "fc"))
 import contracts as C  # noqa: E402
 import e2_manifest as M  # noqa: E402
 import run_e2 as E  # noqa: E402
+import tool_schema as TS  # noqa: E402
 from summarize_fc import mcnemar_exact, wilson  # noqa: E402
 
 CLASSES = ("injected", "tool_error", "normal")
@@ -39,6 +50,18 @@ CLASS_NAMES = {"injected": "注入的故障", "tool_error": "工具返回错误"
 RESPONSES = ("retry", "switch", "other")
 RESPONSE_NAMES = {"retry": "重试原工具", "switch": "换用备用工具", "other": "其他"}
 BASELINE, TREATED = "baseline", "full"
+ARM_NAMES = {"baseline": "基线", "full": "完整回执", "stripped": "去掉备用工具列表"}
+
+
+def compared_arms(run_cfg: dict) -> tuple[str, str]:
+    """(对照组, 处理组)。处理组固定是完整回执;① ③ 的对照是基线,② 的对照是去掉备用工具列表的回执。"""
+    arms = list(run_cfg["arms"])
+    if len(arms) != 2 or TREATED not in arms:
+        raise ValueError(f"运行必须恰好两组且含 {TREATED!r},收到 {arms}")
+    control = next(a for a in arms if a != TREATED)
+    if control not in ARM_NAMES:
+        raise ValueError(f"未知的对照组 {control!r}")
+    return control, TREATED
 
 
 # ---------------------------------------------------------------- 轨迹与回执
@@ -120,14 +143,57 @@ def paired(rows: list[tuple[bool, bool]]) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- 重复运行:pass^k 与重跑翻转率
+def pass_hat_k(c: int, n: int, k: int) -> Fraction:
+    """同一题跑 n 次、通过 c 次时,"k 次独立运行全部通过"概率的无偏估计 C(c,k)/C(n,k)(c < k 时为 0)。"""
+    if not 1 <= k <= n:
+        raise ValueError(f"需要 1 ≤ k ≤ n,收到 k = {k}、n = {n}")
+    if not 0 <= c <= n:
+        raise ValueError(f"需要 0 ≤ c ≤ n,收到 c = {c}、n = {n}")
+    return Fraction(math.comb(c, k), math.comb(n, k))
+
+
+def flip_rate(items: list[list[bool]]) -> Fraction | None:
+    """重跑翻转率:同一题两次独立运行结果不同的概率。每题的无偏估计是两两比较中不同的比例 2c(n−c)/(n(n−1)),
+    再对至少跑过两次的题取平均;没有这样的题时无定义(None)。"""
+    rates = [Fraction(2 * sum(o) * (len(o) - sum(o)), len(o) * (len(o) - 1)) for o in items if len(o) >= 2]
+    return sum(rates, Fraction(0)) / len(rates) if rates else None
+
+
+def repeat_summary(items: list[list[bool]]) -> dict:
+    """items = 每题各次运行的通过与否。k = 各题重复次数的最小值(pass^k 用公共的 k);k = 1 时两项都不输出。"""
+    k = min(len(o) for o in items)
+    out = {"k": k, "k_max": max(len(o) for o in items), "pass_k": None, "flip": None}
+    if k >= 2:
+        out["pass_k"] = sum((pass_hat_k(sum(o), len(o), k) for o in items), Fraction(0)) / len(items)
+        out["flip"] = flip_rate(items)
+    return out
+
+
+def repeat_outcomes(records: list[dict], done: list[str], arms: tuple[str, str]) -> dict[str, list[list[bool]]]:
+    """每组、每个完成配对的各次有效运行:只算两组都没有 API 错误的尝试(一次尝试 = 两组各跑一遍)。"""
+    by_attempt = defaultdict(dict)
+    done_set = set(done)
+    for r in records:
+        if r["pair"] in done_set and r["api_failures"] == 0:
+            by_attempt[(r["pair"], r["attempt"])][r["arm"]] = bool(r["passed"])
+    out = {arm: defaultdict(list) for arm in arms}
+    for (pair, _), res in sorted(by_attempt.items()):
+        if all(a in res for a in arms):
+            for arm in arms:
+                out[arm][pair].append(res[arm])
+    return {arm: [out[arm][p] for p in sorted(out[arm])] for arm in arms}
+
+
 def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, receipts: dict, folds_regs,
-          prompt_budget: int | None) -> dict:
-    """inferences[(pair, arm)] = 推理 JSON;receipts[(pair, attempt)] = 回执组该次尝试的回执记录列表。"""
+          prompt_budget: int | None, control: str = BASELINE) -> dict:
+    """inferences[(pair, arm)] = 推理 JSON;receipts[(pair, attempt)] = 完整回执组该次尝试的回执记录列表。
+    回执与反应只分析完整回执组(② 的对照组回执不带备用工具列表,"换用备用工具"无定义)。"""
     keys = {p.key: p for p in manifest_pairs}
     latest = {(r["pair"], r["arm"]): r for r in E.latest_records([r for r in records if r["pair"] in keys])}
     done, unresolved = [], []
     for k in keys:
-        rb, rt = latest.get((k, BASELINE)), latest.get((k, TREATED))
+        rb, rt = latest.get((k, control)), latest.get((k, TREATED))
         ok = rb and rt and rb["attempt"] == rt["attempt"] and rb["api_failures"] == 0 and rt["api_failures"] == 0
         (done if ok else unresolved).append(k)
     regs, folds = folds_regs
@@ -137,10 +203,12 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
     win_label = Counter()
     strata = defaultdict(list)
     rows = []
+    outcomes = {}                          # 配对 → (对照组通过, 完整回执组通过)
     for k in done:
         p = keys[k]
-        x, y = bool(latest[(k, BASELINE)]["passed"]), bool(latest[(k, TREATED)]["passed"])
+        x, y = bool(latest[(k, control)]["passed"]), bool(latest[(k, TREATED)]["passed"])
         rows.append((x, y))
+        outcomes[k] = (x, y)
         strata[(p.tier, p.mode)].append((x, y))
         win = (not x) and y
         events = tool_events(inferences[(k, TREATED)])
@@ -167,24 +235,27 @@ def build(records: list[dict], manifest_pairs: list[E.Pair], inferences: dict, r
         overflow = sorted((r["pair"], r["arm"], r["max_prompt_tokens"]) for r in latest.values()
                           if r["pair"] in keys and r["max_prompt_tokens"] > prompt_budget)
     eps = [r for r in latest.values() if r["pair"] in keys]
-    return {"n_manifest": len(keys), "done": len(done), "unresolved": sorted(unresolved),
+    reps = repeat_outcomes(records, done, (control, TREATED))
+    return {"repeats": {arm: repeat_summary(items) for arm, items in reps.items() if items},"n_manifest": len(keys), "done": len(done), "unresolved": sorted(unresolved),
             "pair_reruns": E.pair_reruns([r for r in records if r["pair"] in keys]),
             "error_in_answer": sum(r["error_in_answer"] for r in eps),
             "harness_errors": sum(bool(r.get("harness_error")) for r in eps),
             "primary": paired(rows), "strata": {s: paired(v) for s, v in sorted(strata.items())},
             "cls_n": cls_n, "cls_r": cls_r, "cls_ge2": cls_ge2, "resp_all": resp_all, "resp_win": resp_win,
-            "win_label": win_label, "overflow": overflow, "prompt_budget": prompt_budget}
+            "win_label": win_label, "overflow": overflow, "prompt_budget": prompt_budget, "control": control,
+            "outcomes": outcomes}
 
 
 def pct_ci(lo: float, hi: float) -> str:
     return f"[{max(-1.0, lo):.1%}, {min(1.0, hi):.1%}]"
 
 
-def diff_lines(p: dict) -> list[str]:
-    """配对差 δ = (胜 − 负)/n 的点估计与 95% 区间。"""
+def diff_lines(p: dict, cn: str = ARM_NAMES[BASELINE], tn: str = ARM_NAMES[TREATED]) -> list[str]:
+    """配对差 δ = (胜 − 负)/n 的点估计与 95% 区间;cn / tn = 对照组 / 处理组的名称。"""
     if not p["n"]:
         return []
-    out = [f"配对差 δ = (胜 − 负)/n = ({p['wins']} − {p['losses']})/{p['n']} = {p['diff']:.1%}(= 回执组完成率 − 基线完成率)。", ""]
+    out = [f"配对差 δ = (胜 − 负)/n = ({p['wins']} − {p['losses']})/{p['n']} = {p['diff']:.1%}"
+           f"(= {tn}组完成率 − {cn}组完成率)。", ""]
     if p["diff_wilson"] is not None:
         out += [f"- Wilson {pct_ci(*p['diff_wilson'])}:负 = 0 时 δ = 胜/n,取 Wilson(胜, n),"
                 f"即 (p̂ + z²/2n ± z·√(p̂(1−p̂)/n + z²/4n²)) / (1 + z²/n),p̂ = {p['wins']}/{p['n']},z = 1.96;"
@@ -194,24 +265,88 @@ def diff_lines(p: dict) -> list[str]:
     return out
 
 
+OLD_PIPELINE = "旧管线:无属性 object 参数被压成 {}"
+
+
+def pipeline(order: dict, inferences: dict, bare: frozenset) -> dict:
+    """运行时是否打了无属性对象补丁(order.json),以及各组推理文件里这类参数的取值次数。"""
+    counts = defaultdict(Counter)
+    for (_, arm), d in inferences.items():
+        counts[arm] += TS.bare_argument_states(d.get("messages") or [], bare)
+    return {"patched": bool(order.get("bare_object_additional_properties")), "counts": dict(counts)}
+
+
+def pipeline_lines(pl: dict | None) -> list[str]:
+    if not pl:
+        return []
+    total = Counter()
+    for c in pl["counts"].values():
+        total += c
+    if pl["patched"]:
+        head = "新管线:工具 schema 里的无属性 object 参数已加 additionalProperties: true"
+    elif not total:
+        head = "工具 schema 未打补丁;本运行没有调用带无属性 object 参数的工具"
+    elif total["empty"] * 2 > sum(total.values()):
+        head = (f"{OLD_PIPELINE}(工具 schema 未打补丁;硅基流动把只写 type: object 的参数压成空值,"
+                "见 eval/agent_error/schema_probe/results/summary.md)")
+    else:
+        head = "工具 schema 未打补丁,但本运行里无属性 object 参数大多正常传值(不受硅基流动压成 {} 的问题影响)"
+    out = [f"- {head}"]
+    for arm, c in sorted(pl["counts"].items()):
+        n = sum(c.values())
+        out.append(f"- {ARM_NAMES.get(arm, arm)}组:无属性 object 参数 {n} 次,传空 {rate(c['empty'], n)},"
+                   f"非空对象 {c['nonempty']},其他类型 {c['other']}")
+    return out
+
+
+def fraction_pct(x: Fraction | None) -> str:
+    return "—" if x is None else f"{float(x):.1%}"
+
+
+def repeat_cells(s: dict, arm: str) -> str:
+    r = (s.get("repeats") or {}).get(arm)
+    if not r:
+        return "— | —"
+    k = str(r["k"]) if r["k"] == r["k_max"] else f"{r['k']}(最多 {r['k_max']})"
+    return f"{k} | {fraction_pct(r['pass_k'])}"
+
+
+def repeat_lines(s: dict, cn: str, tn: str) -> list[str]:
+    reps = s.get("repeats") or {}
+    if not reps:
+        return []
+    if all(r["k"] == 1 for r in reps.values()):
+        return ["k = 1:每个配对每组只有一次有效运行。pass^k 的无偏估计 C(c,k)/C(n,k) 在 k = 1 时就等于完成率本身,"
+                "重跑翻转率需要同一题至少两次独立运行,所以不输出 pass^k 和翻转率。", ""]
+    names = {s["control"]: cn, TREATED: tn}
+    flips = ",".join(f"{names[a]} {fraction_pct(r['flip'])}" for a, r in reps.items())
+    return ["pass^k = 每题 C(c,k)/C(n,k) 的平均(n = 该题有效运行次数,c = 通过次数,k = 各题公共的最小重复次数),"
+            "估计「同一题连续 k 次都通过」的概率;只算两组都没有 API 错误的尝试。",
+            f"重跑翻转率(同一题两次独立运行结果不同的概率,每题 2c(n−c)/(n(n−1)) 取平均):{flips}。", ""]
+
+
 def render(s: dict, title: str) -> str:
     p = s["primary"]
+    cn, tn = ARM_NAMES[s["control"]], ARM_NAMES[TREATED]
     lines = [f"# {title}(由 eval/agent_error/summarize_e2.py 生成,勿手改)", "",
              "## 运行完整性", "",
              f"- 冻结清单配对 {s['n_manifest']} 对;两组都完成且无 API 错误 {s['done']} 对;未完成 {len(s['unresolved'])} 对"
              + (f"({', '.join(s['unresolved'][:10])})" if s["unresolved"] else ""),
              f"- 因 API 错误或中断整对重跑 {s['pair_reruns']} 次;最终回答含 \"Error during execution\" 的回合 "
-             f"{s['error_in_answer']} 个(多为模型参数无法解析等非 API 原因);运行框架报错 {s['harness_errors']} 个", "",
-             "## 主要比较:配对完成率(基线 vs 完整回执)", "",
-             "| 组 | 完成率 [95% Wilson] |", "|---|---|",
-             f"| 基线 | {rate(p['base'], p['n'])} |", f"| 完整回执 | {rate(p['treat'], p['n'])} |", "",
-             f"不一致配对:只有回执组完成(胜){p['wins']} 对,只有基线完成(负){p['losses']} 对;"
-             f"精确 McNemar 双侧 p = {p['p']:.3g}。", ""] + diff_lines(p) + [
-             "| 层级 | 模式 | 配对 | 基线 | 回执 | 胜 : 负 | p |", "|---|---|---|---|---|---|---|"]
+             f"{s['error_in_answer']} 个(多为模型参数无法解析等非 API 原因);运行框架报错 {s['harness_errors']} 个",
+             *pipeline_lines(s.get("pipeline")), "",
+             f"## 主要比较:配对完成率({cn} vs {tn})", "",
+             "| 组 | 完成率 [95% Wilson] | 每题重复次数 k | pass^k |", "|---|---|---|---|",
+             f"| {cn} | {rate(p['base'], p['n'])} | {repeat_cells(s, s['control'])} |",
+             f"| {tn} | {rate(p['treat'], p['n'])} | {repeat_cells(s, TREATED)} |", "",
+             *repeat_lines(s, cn, tn),
+             f"不一致配对:只有{tn}组完成(胜){p['wins']} 对,只有{cn}组完成(负){p['losses']} 对;"
+             f"精确 McNemar 双侧 p = {p['p']:.3g}。", ""] + diff_lines(p, cn, tn) + [
+             f"| 层级 | 模式 | 配对 | {cn} | {tn} | 胜 : 负 | p |", "|---|---|---|---|---|---|---|"]
     for (tier, mode), q in s["strata"].items():
         lines.append(f"| {tier.upper()} | {mode} | {q['n']} | {q['base']} | {q['treat']} | {q['wins']} : {q['losses']} | {q['p']:.3g} |")
     total_r = sum(s["cls_r"].values())
-    lines += ["", "## 回执三分类(回执组全部工具结果)", "",
+    lines += ["", f"## 回执三分类({tn}组全部工具结果)", "",
               "| 类别 | 工具结果 | 回执 | 触发率 | 回执中可选工具 ≥ 2 |", "|---|---|---|---|---|"]
     for c in CLASSES:
         lines.append(f"| {CLASS_NAMES[c]} | {s['cls_n'][c]} | {s['cls_r'][c]} | {rate(s['cls_r'][c], s['cls_n'][c])} | "
@@ -235,7 +370,97 @@ def render(s: dict, title: str) -> str:
         lines += ["", f"## 输入长度(预算 {s['prompt_budget']} token = num_ctx − max_tokens)", "",
                   f"单次请求最大输入超过预算的回合:{len(s['overflow'])} 个" + ("。" if not s["overflow"] else ":")]
         lines += [f"- {pair} {arm}:{mx}" for pair, arm, mx in s["overflow"]]
+    lines += extra_lines(s, cn, tn)
     return "\n".join(lines) + "\n"
+
+
+def sensitivity(outcomes: dict, pairs: list[E.Pair], excluded_tasks: set[str]) -> dict | None:
+    """去掉 excluded_tasks(如试跑用过的任务)后重算配对比较;本运行里没有这些任务时返回 None。"""
+    drop = {p.key for p in pairs if p.task_id in excluded_tasks and p.key in outcomes}
+    if not drop:
+        return None
+    rows = [v for k, v in outcomes.items() if k not in drop]
+    return {"dropped": sorted(drop), **paired(rows)}
+
+
+def cohen_kappa(rows: list[tuple[bool, bool]]) -> float | None:
+    """两次运行逐对通过与否的 Cohen κ = (p_o − p_e)/(1 − p_e);p_e = 1(两边全同一类)时无定义,返回 None。"""
+    n = len(rows)
+    if not n:
+        return None
+    po = sum(a == b for a, b in rows) / n
+    p1, p2 = sum(a for a, _ in rows) / n, sum(b for _, b in rows) / n
+    pe = p1 * p2 + (1 - p1) * (1 - p2)
+    return None if pe == 1 else (po - pe) / (1 - pe)
+
+
+def positive_agreement(both: int, only_a: int, only_b: int) -> float | None:
+    """正一致率 PA = 2a/(2a + b + c):只看"至少一次通过"的配对里两次都通过的程度;分母为 0(两次都没有通过)时无定义。
+    通过率低时 κ 和总一致率会被大量"都失败"的配对主导,PA 不受这部分影响。"""
+    denom = 2 * both + only_a + only_b
+    return None if denom == 0 else 2 * both / denom
+
+
+def replication(outcomes: dict, reference: dict[str, bool]) -> dict | None:
+    """完整回执组与参考运行(① 的完整回执组)在共同配对上逐对比较:一致率、κ、2×2 表。"""
+    rows = [(reference[k], y) for k, (_, y) in sorted(outcomes.items()) if k in reference]
+    if not rows:
+        return None
+    both, ref_only = sum(a and b for a, b in rows), sum(a and not b for a, b in rows)
+    new_only = sum(b and not a for a, b in rows)
+    return {"n": len(rows), "agree": sum(a == b for a, b in rows), "kappa": cohen_kappa(rows),
+            "pa": positive_agreement(both, ref_only, new_only),
+            "both": both, "ref_only": ref_only, "new_only": new_only, "neither": len(rows) - both - ref_only - new_only,
+            "p": mcnemar_exact(new_only, ref_only)}
+
+
+def extra_lines(s: dict, cn: str, tn: str) -> list[str]:
+    out = []
+    sen = s.get("sensitivity")
+    if sen:
+        out += ["", "## 敏感性分析:去掉与试跑重叠的任务", "",
+                f"去掉 {len(sen['dropped'])} 对({', '.join(sen['dropped'])};这些任务用作过试跑,结果未计入),剩 {sen['n']} 对:", "",
+                "| 组 | 完成率 [95% Wilson] |", "|---|---|",
+                f"| {cn} | {rate(sen['base'], sen['n'])} |", f"| {tn} | {rate(sen['treat'], sen['n'])} |", "",
+                f"胜 : 负 = {sen['wins']} : {sen['losses']},精确 McNemar 双侧 p = {sen['p']:.3g};"
+                f"配对差 δ = {sen['diff']:.1%},Newcombe {pct_ci(*sen['diff_newcombe'])}。"]
+    rep = s.get("replication")
+    if rep:
+        kappa = "无定义(两次运行全部同为通过或同为失败)" if rep["kappa"] is None else f"{rep['kappa']:.2f}"
+        pa = ("无定义(两次都没有通过的配对)" if rep["pa"] is None else
+              f"2×{rep['both']}/(2×{rep['both']} + {rep['ref_only']} + {rep['new_only']}) = {rep['pa']:.2f}")
+        out += ["", f"## 复现性:{tn}组与 ① 的{tn}组逐对比较(共同的 {rep['n']} 对)", "",
+                f"| | 本次通过 | 本次失败 |", "|---|---|---|",
+                f"| ① 通过 | {rep['both']} | {rep['ref_only']} |", f"| ① 失败 | {rep['new_only']} | {rep['neither']} |", "",
+                f"一致率 {rate(rep['agree'], rep['n'])};Cohen κ = {kappa};正一致率 PA = 2a/(2a+b+c) = {pa};"
+                f"两次运行通过率之差的精确 McNemar 双侧 p = {rep['p']:.3g}。",
+                "同一配置、温度 0 重跑,不一致来自 API 端的非确定性;κ 衡量这种抖动下逐题结论有多稳定。",
+                "通过率低时总一致率主要由「两次都失败」撑起来,κ 又对边缘比例敏感,所以另报 PA:通过过的配对里有多少两次都通过。"]
+    return out
+
+
+def read_order(run_dir: str) -> dict:
+    path = os.path.join(run_dir, "order.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def pilot_tasks(results_dir: str) -> set[str]:
+    """同一配置试跑用过的任务(<results_dir>/pilot/order.json);没有试跑记录时为空集。"""
+    path = os.path.join(results_dir, "pilot", "order.json")
+    if not os.path.exists(path):
+        return set()
+    with open(path, encoding="utf-8") as fh:
+        return {e["task_id"] for e in json.load(fh)["order"]}
+
+
+def reference_full(results_dir: str, ref_run: str = "main") -> dict[str, bool]:
+    """参考运行(①)里完整回执组每对最近一次、无 API 错误的通过与否。"""
+    recs = E.read_records(os.path.join(results_dir, ref_run, "episodes.jsonl"))
+    return {r["pair"]: bool(r["passed"]) for r in E.latest_records(recs)
+            if r["arm"] == TREATED and r["api_failures"] == 0}
 
 
 # ---------------------------------------------------------------- 读文件
@@ -243,8 +468,7 @@ def load_run(cfg: dict, cfg_path: str, run: str) -> tuple[str, list[dict], dict,
     e2 = cfg["e2"]
     out = os.path.abspath(os.path.join(os.path.dirname(cfg_path), e2["results_dir"], run))
     records = E.read_records(os.path.join(out, "episodes.jsonl"))
-    with open(M.OUT, encoding="utf-8") as fh:
-        pairs = E.pairs_for(e2["runs"][run]["episodes"], json.load(fh))
+    pairs = E.pairs_for(e2["runs"][run]["episodes"], M.load())
     model = cfg["agent"]["model"].replace("/", "_").replace(":", "_")
     inferences = {}
     for r in E.latest_records(records):
@@ -271,8 +495,15 @@ def main() -> None:
         sys.exit(f"没有运行记录:{out}")
     e2 = cfg["e2"]
     budget = (e2["num_ctx"] - cfg["agent"]["max_tokens"]) if e2.get("num_ctx") else None
-    s = build(records, pairs, inferences, receipts, C.load(os.path.join(C.OUT, e2.get("registry", "gold"))), budget)
-    src = "local" if e2.get("num_ctx") else "api"
+    control, _ = compared_arms(e2["runs"][a.run])
+    s = build(records, pairs, inferences, receipts, C.load(os.path.join(C.OUT, e2.get("registry", "gold"))), budget,
+              control)
+    results_dir = os.path.dirname(out)
+    pilot_root = os.path.abspath(os.path.join(os.path.dirname(cfg_path), e2.get("pilot_results_dir", e2["results_dir"])))
+    s["sensitivity"] = sensitivity(s["outcomes"], pairs, pilot_tasks(pilot_root))
+    s["replication"] = replication(s["outcomes"], reference_full(results_dir) if a.run != "main" else {})
+    s["pipeline"] = pipeline(read_order(out), inferences, TS.load_bare_params(os.path.join(E.T.TM, "tools", "definitions")))
+    src = e2.get("tag") or ("local" if e2.get("num_ctx") else "api")
     text = render(s, f"E2 {src} / {a.run}:{cfg['agent']['model']}")
     path = os.path.join(ROOT, "eval", "results", f"e2_{src}_{a.run}_summary.md")
     with open(path, "w", encoding="utf-8") as fh:

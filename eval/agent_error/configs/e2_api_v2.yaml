@@ -1,0 +1,50 @@
+# E2 新管线(v2):与 e2_api.yaml 只差三处——
+#   1. patch.bare_object_additional_properties: true。旧管线下硅基流动把工具 schema 里只写 type: object 的参数
+#      压成 {}(① API 793/793 次),动作带着空数据执行;最小复现见 eval/agent_error/schema_probe/results/summary.md。
+#   2. 结果写 e2/api_v2,汇总写 eval/results/e2_api_v2_<run>_summary.md;旧结果(e2/api)不动,仍用 e2_api.yaml 汇总。
+#   3. 不再试跑;敏感性分析里的试跑任务仍取旧管线的试跑记录(pilot_results_dir)。
+# 其余(模型、温度 0、关闭思考、清单、种子、限速)与 e2_api.yaml 相同。按 ① → ③ → ② 的顺序跑:
+# scripts\run_e2_main.bat、run_e2_p0.bat、run_e2_stripped.bat。
+
+agent:
+  type: "openai"
+  model: "Qwen/Qwen3.5-35B-A3B"
+  base_url: "${SILICONFLOW_BASE_URL}"
+  api_key: "${SILICONFLOW_API_KEY}"
+  temperature: 0
+  max_tokens: 16000                    # ToolMaze 论文设置;关闭思考后实际输出远小于此
+  extra_body:
+    enable_thinking: false
+
+execution:
+  max_rounds: 25                       # ToolMaze 论文:最多 25 步
+
+data:
+  tools_dir: "tools"                   # 相对 ToolMaze 目录
+  template_dir: "data/templates"
+
+patch:
+  request_timeout_s: 300
+  bare_object_additional_properties: true   # toolmaze_run 第 7 条:无属性 object 参数加 additionalProperties: true
+  retry: {max_attempts: 8, base_s: 5, cap_s: 120}          # 429 / 超时 / 连接 / 5xx 指数退避加抖动
+  rate_limit:
+    tpm: 40000                         # 硅基流动 L0:每分钟 4 万 token
+    rpm: 1000                          # 每分钟 1,000 次请求
+    headroom: 0.9                      # 只用 90%
+    chars_per_token: 2.5               # 输入估算的保守初值,运行中用实际 prompt_tokens 校准
+    output_ratio: 0.01                 # 输出 ≈ max_tokens × 该比例;试跑实测每次调用约 72 token(16000 × 0.0045),取 0.01 留余量
+
+e2:
+  registry: gold                       # contracts.py build --source gold 的产物
+  seed: 20261108                       # 配对顺序与组内先后;pilot 抽题用 seed + 1
+  workers: 4
+  max_pair_attempts: 3
+  price_usd_per_m: {input: 0.24, output: 1.80}   # 与 cost_report.py 相同(硅基流动官方博客价)
+  results_dir: "../../../external/agent_error/results/e2/api_v2"
+  pilot_results_dir: "../../../external/agent_error/results/e2/api"   # 试跑只在旧管线做过
+  tag: api_v2                          # 汇总文件名 e2_api_v2_<run>_summary.md
+  runs:
+    main:     {episodes: main,  arms: {baseline: "off", full: full}}       # ① 80 对,先跑这个
+    main_supp: {episodes: ext,  arms: {baseline: "off", full: full}}       # ① 补充清单 120 对,与 main 合起来 200 对;结果写 main_supp(scripts\run_e2_main_supp.bat)
+    p0:       {episodes: p0,    arms: {baseline: "off", full: full}}       # ③ 同 80 题的 P0:回执会不会伤害无故障表现(scripts\run_e2_p0.bat)
+    stripped: {episodes: main_ext, arms: {full: full, stripped: stripped}}  # ② 去掉备用工具列表的对照(scripts\run_e2_stripped.bat);两组都重跑;200 对 = 主清单 80 + 补充清单 120

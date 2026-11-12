@@ -36,6 +36,10 @@ eval/agent_error/configs/          我们的运行配置
 6. **判分是纯规则的**:`judge.py` 只保存了 LLM 客户端,公开代码里从未调用;判分确定、零成本。
    LLM 裁判(硅基流动 DeepSeek-V3.2)改为用于失败回合的"结果是否正确"审计,并用人工标注校准(Cohen's κ)。
 7. **并发**:本地 Ollama 串行处理,并发设 1;耗时用服务端计时,不用客户端墙钟时间。
+8. **无属性 object 参数被 API 压成空值**(E2 阶段 C 发现):111 个顶层参数、8 个数组元素的 schema 只写 `type: object`、
+   没有 `properties`。硅基流动上 Qwen3.5-35B-A3B 把它们传成 `{}`,DeepSeek-V3.2 传成 `""`;本地 Ollama 正常。
+   官方判分按路径、不看参数内容,所以测不出来。修法:`toolmaze_run` 第 7 条补丁加 `additionalProperties: true`
+   (见下方「E2 管线问题」)。
 
 ## 运行
 
@@ -96,6 +100,10 @@ domain ≥ 4 个字符串样本、规范化(去首尾空格、小写)后 ≤ 8 �
 - 规格(`contracts.SPEC` 的规范 JSON):`SPEC_SHA256: c3297b2d6cf518fdbeace262b11c53b748145f301fb646f639c019e7ad86e453`
 - 回合清单 `configs/e2_manifest.json`(主实验 C3/P3、C3/P4、C4/P3、C4/P4 各 20 个、共 80 个互不相同的任务,种子 20261108;
   补充 C1 全部 100 题 × P3/P4):`MANIFEST_SHA256: 8d43264736a91674342f3a828a9fe9d511df8b2314b7e48af6d31be38916936d`
+- ② 的补充清单 `configs/e2_manifest_ext.json`(2026-11-09 冻结,② 运行前;`python eval/agent_error/e2_manifest.py --ext`):
+  C3、C4 里主清单没用过的全部 120 题,每层打乱后一半 P3、一半 P4(每层 × 模式 30 题,每题一种模式),种子 20261109;
+  文件里记了主清单哈希,加载时不符即报错。`EXT_SHA256: eb47ca3ac1b8d419d901e06989d2e8ad671a878ba68cd3aae184d6bb429f4632`。
+  其中 5 题(C3_task_006/017/045、C4_task_045/079)用作过 ① 的试跑(基线 vs 完整回执,结果不计入),② 是重新运行。
 
 注册表构建(标准轨迹,2026-11-08,仓库 56d80cf):3,734 个去重样本、400 个工作流,5 份注册表合计 16,720 条不变量
 (论文 15,041 条,计数口径含必有字段与类型约束)。E1 来源:498 个样本、100 个工作流、6,177 条。
@@ -206,6 +214,77 @@ scripts\run_e2_local.bat     本地 qwen3i-8k:同 80 对,日志 external\logs\e2
 - **②(完整回执 vs 去掉备用工具列表)**:两组都重新跑,不复用 ① 的完整回执组(同一配置重跑才能随机交错、
   消除运行时间差异)。若备用工具列表贡献了 ① 的全部增益,预期 δ ≈ 13.8%,n = 80 刚好高于 MDE 12.2%;
   若只贡献一半(约 7%),n = 200 也检不出(MDE 8.0%)。所以 n = 80 只能回答"是否几乎全部来自备用工具列表",
-  回答不了"贡献了多少";要扩大样本,需先从剩余 120 道题按同样的种子规则冻结一份追加清单(不改现有清单)。
+  回答不了"贡献了多少"。**选定方案 B(2026-11-09):② 跑 200 对**(冻结清单 80 + 补充清单 120,见上方冻结规格),
+  MDE 8.0%;③ 保持 80 对。② 的汇总另报两项:(a) 去掉 5 道与试跑重叠的任务后的敏感性分析;
+  (b) 完整回执组在原 80 对上与 ① 的完整回执组逐对比较(一致率、Cohen κ),衡量温度 0 下重跑的稳定性。
 - **③(P0:基线 vs 完整回执)**:同一批 80 道题的 P0。预测是"变化在 ±5pp 以内",而 n = 80 的 MDE 约 12%,
   所以 ③ 只能检出较大的伤害;"未检出差异"不等于"差异在 ±5pp 以内",报告里同时给 δ 的 Newcombe 区间。
+
+### E2 管线问题:无属性 object 参数被压成空值(2026-11-09)
+
+**现象**(`summarize_e2.py` 汇总里「运行完整性」一节逐组统计;判分调查见 `judge/survey.py` 第 6 节):
+
+| 运行 | 无属性 object 参数 | 传空 |
+|---|---|---|
+| ① API(硅基流动 Qwen3.5-35B-A3B) | 408 + 385 = 793 | 793(100%) |
+| ③ API(同上) | 373 + 443 = 816 | 816(100%) |
+| ① 本地(Ollama qwen3i-8k) | 87 + 99 = 186 | 0 |
+
+上游用 `json.loads` 解析模型返回的 arguments 字符串,不会丢嵌套对象;空值来自 API 端。
+
+**最小复现**(`schema_probe/probe.py`,结果 `schema_probe/results/`):从 ① 基线组按固定规则选一个请求
+(C4_task_010_P3 第 13 条消息之前,此前工具结果都未注入;原运行这一步把 `alert_card` 传成 `{}`),
+用上游代码原样重建,只改工具 schema 或模型,每个变体温度 0 发 3 次:
+
+| 变体 | `alert_card` |
+|---|---|
+| A 原 schema,Qwen3.5-35B-A3B | 3/3 `{}` |
+| B 加 `additionalProperties: true`,Qwen | 3/3 完整对象(与上一步工具输出一致) |
+| C 按 P0 参考补 `properties`,Qwen(只做诊断) | 3/3 完整对象 |
+| D 原 schema,DeepSeek-V3.2 | 3/3 `""` |
+
+两个不同家族的模型在同一服务商上都把无属性对象变成空值,加 `additionalProperties: true` 即恢复,
+所以是服务端按 schema 做受约束解码的问题,不是模型能力问题。局限:只复现了一个请求(温度 0 下 3 次相同);
+新管线 ① 的汇总会给出全部调用里的传空比例,作为大样本检验。
+
+**影响**:① ③ 按 ToolMaze 官方判分算出的数字本身没有算错(判分只看路径);但它们是在「动作带空数据执行」的条件下测的,
+沙盒返回的结果也会随之不同(如余额显示 0 USD),可能改变后续轨迹,所以不能直接当作论文设置下的结论。
+按结果判分时 ① 的 11 个 ToolMaze 通过全部是「必需参数为空」。旧结果保留在 `e2/api`,汇总标注「旧管线」。
+
+**新管线**(`configs/e2_api_v2.yaml`,结果写 `e2/api_v2`,汇总 `eval/results/e2_api_v2_<run>_summary.md`):
+与 `e2_api.yaml` 只差 `patch.bare_object_additional_properties: true` 和输出位置(测试
+`test_v2_config_differs_from_old_only_in_schema_patch_and_output` 保证)。补丁只改发给模型的工具列表,
+工具执行与判分不变;`order.json` 记下是否打了补丁。按 ① → ③ → ② 重跑(`scripts\run_e2_main.bat`、
+`run_e2_p0.bat`、`run_e2_stripped.bat`),每次运行前先写预测(`check_prediction.py` 在启动前检查)。
+① v2 扩到 200 对时,补充清单 120 对单独跑 `main_supp`(回合组 `ext`,`scripts\run_e2_main_supp.bat`),结果写 `e2/api_v2/main_supp`。
+200 对合并汇总:`summarize_e2_combined.py --config configs/e2_api_v2.yaml --runs main,main_supp --name main200`
+→ `eval/results/e2_api_v2_main200_summary.md`(按清单与层级 × 模式分层、两部分效果一致性的 Fisher 检验;
+扩样是看到 80 对结果之后决定的,合计 p 按两次检验做 Bonferroni 校正)。
+规则层对照新旧管线:`judge/compare.py` → `eval/results/e2_judge_compare.md`(L3 之前只给上下界)。
+
+**两篇论文会不会也有这个问题**(只读论文和上游代码,未调用):
+
+- ToolMaze(arXiv 2606.05806 §4.1):10 个模型,温度 1、max_tokens 16000、最多 25 步;论文没写接入方式。
+  上游 `run_api_eval.py` 把所有模型都按 `openai` 类型接同一个 OpenAI 兼容地址(`API_BASE_URL` 留空),
+  工具用原生 function calling,schema 原样发送。会不会被压成空值取决于各服务商,论文判分(TSR)按路径,
+  即使发生也不会体现在数字里。
+- Outcome Monitors(arXiv 2608.19303 §4):DeepSeek V4 Flash / V4 Pro 走 DeepSeek 官方 API,
+  Qwen 3.7 Plus / Max 走 OpenRouter,MiniMax M3 走 OpenRouter 上 MiniMax 自己托管的 FP8 路由;温度 0,关闭扩展推理。
+  主要指标是完整任务完成(ToolMaze 判分),论文自己也写了「传播了损坏值的回合仍可能通过」。
+  论文没有提到参数为空或 schema 处理,我们无法判断他们的服务商是否也这样做。
+  如果他们的路由也压空,路径层增益的数字照样算得出来,「结果是否正确」则同样没有证据。
+
+### E2 阶段 C:按结果判分——规则层(2026-11-09,不调用模型)
+
+**为什么不用 ToolMaze 判分、也不只看最终回答**:ToolMaze 按路径判分,会漏掉结果错误。例如 C3_task_039 P3 换到另一条有效路径后
+发布了空的台账对象,沙盒返回 "Broker balance account: 0 USD",ToolMaze 仍判通过。回放沙盒下最终 ID 基本固定,只看最终回答也不行。
+
+**结果正确的定义**:完成必需动作 + 每个调用参数都能溯源到用户提示或未注入的工具输出。代码在 `judge/`:
+`normalize.py`(数字容差 0.005 / 1e-4、日期转 ISO、证据类与弱值;阈值是命名常量)、`reference.py`(P0 参考路径、
+工具类别与 required 参数、替代工具)、`trajectory.py`(调用序列、注入标签、损坏值)、`rules.py`(L1 / L2,规则写在模块说明里)、
+`survey.py`(复现调查数字,写 `eval/results/e2_judge_survey.md`)。L3 的 LLM 裁判(DeepSeek-V3.2)等 ② 跑完再做。
+
+**管线问题(按规矩 3 先查管线)**:ToolMaze 有 111 个参数在 schema 里只写 `type: object`、没有 properties。
+① API 里这类参数 793 次全部是空 `{}`,① 本地 186 次全部非空(`survey.py` 第 6 节)。上游用 `json.loads` 直接解析参数,
+不会丢嵌套对象,所以空对象来自 API 端,不是模型行为。API 运行里这类动作都带着空数据执行;按结果判分时 API 的这些回合都会判失败;
+对路径层数字的影响见上一节「E2 管线问题」。

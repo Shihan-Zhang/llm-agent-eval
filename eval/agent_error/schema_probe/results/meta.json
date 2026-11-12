@@ -1,0 +1,55 @@
+{
+  "date": "2026-11-09",
+  "episode": {
+    "file": "external\\agent_error\\results\\e2\\api\\main\\baseline\\Qwen_Qwen3.5-35B-A3B\\fc\\c4\\inferences\\C4_task_010_P3_inference.json",
+    "task_id": "C4_task_010",
+    "mode": "P3",
+    "message_index": 13,
+    "tool": "archive_weatherapi_alert_card_native",
+    "empty_params": [
+      "alert_card"
+    ],
+    "logged_arguments": {
+      "alert_card": {},
+      "title": "Post-purchase weather archive",
+      "user_id": "user_123",
+      "priority": "medium",
+      "channel": "email"
+    }
+  },
+  "request": {
+    "temperature": 0,
+    "max_tokens": 16000,
+    "parallel_tool_calls": false,
+    "timeout": 300,
+    "extra_body": {
+      "enable_thinking": false
+    }
+  },
+  "variants": {
+    "A": {
+      "desc": "原 schema",
+      "model": "Qwen/Qwen3.5-35B-A3B",
+      "tools_sha": "9614c8c09b11",
+      "messages_sha": "e508eae0425e"
+    },
+    "B": {
+      "desc": "additionalProperties: true",
+      "model": "Qwen/Qwen3.5-35B-A3B",
+      "tools_sha": "42ffaae6e4a1",
+      "messages_sha": "e508eae0425e"
+    },
+    "C": {
+      "desc": "按参考补 properties",
+      "model": "Qwen/Qwen3.5-35B-A3B",
+      "tools_sha": "6cb3dd361dd9",
+      "messages_sha": "e508eae0425e"
+    },
+    "D": {
+      "desc": "原 schema,DeepSeek-V3.2",
+      "model": "deepseek-ai/DeepSeek-V3.2",
+      "tools_sha": "9614c8c09b11",
+      "messages_sha": "e508eae0425e"
+    }
+  }
+}
