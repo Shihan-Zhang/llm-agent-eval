@@ -116,7 +116,7 @@ def embed_error(exc: BaseException, timeout_s: float) -> HTTPException | None:
 # ---------------------------------------------------------------- 应用
 def create_app(retriever: ScoredRetriever, settings: Settings, clock: Callable[[], float] = time.monotonic) -> FastAPI:
     app = FastAPI(title="kb_service", description="个人知识库检索(只读,只给本机的本地模型调用)")
-    limiter = RateLimiter(settings.rate_per_min, clock)
+    limiter = app.state.limiter = RateLimiter(settings.rate_per_min, clock)
 
     @app.middleware("http")
     async def request_log(request: Request, call_next):

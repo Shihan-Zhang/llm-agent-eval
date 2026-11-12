@@ -1,6 +1,7 @@
 """kb_service:知识库检索 HTTP 服务。用假的向量函数,不调用 Ollama、不联网。"""
 import json
 import logging
+import secrets
 import threading
 import urllib.error
 
@@ -96,6 +97,15 @@ def test_missing_or_wrong_key_returns_401(path):
     assert post(c, path, key=None).status_code == 401
     assert post(c, path, key="wrong").status_code == 401
     assert post(c, path, key=None, body={}).status_code == 401     # 鉴权在参数校验之前
+
+
+def test_invalid_keys_get_401_and_never_create_buckets():
+    c = make_client()
+    keys = {secrets.token_urlsafe(16) for _ in range(100)}
+    assert len(keys) == 100 and not keys & {KEY, OTHER}
+    assert all(post(c, key=k).status_code == 401 for k in keys)
+    assert c.app.state.limiter.bucket_count == 0                    # 先鉴权后限流:无效 Key 不建桶
+    assert post(c).status_code == 200 and c.app.state.limiter.bucket_count == 1
 
 
 def test_settings_require_at_least_one_key():
