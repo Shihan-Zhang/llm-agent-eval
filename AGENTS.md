@@ -16,6 +16,7 @@
 | `eval/fc/` | BFCL 函数调用评测 |
 | `rag/`、`eval/rag/` | 中文 RAG(bge-m3 + BM25 + RRF)与检索评测 |
 | `kb_mcp/` | 知识库 MCP 服务器(在 mcp-server-qdrant 0.8.1 上扩展) |
+| `kb_service/` | 知识库检索 HTTP 服务(FastAPI,只读,只监听 127.0.0.1,只给本地模型调用) |
 | `eval/results/` | 定稿报告;`predictions.md` 是事先写下的预测 |
 | `scripts/` | Windows 一键脚本(`.bat` 调 `.ps1`),日志写 `external/logs/` |
 

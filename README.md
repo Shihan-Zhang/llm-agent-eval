@@ -47,6 +47,9 @@ checks, benchmark source audits, run version records), and which model to pick (
 覆盖结果格式,转义块文本(上游原样拼接,笔记里的 `</content>` 可伪造结果边界,见 `tests/test_kb_mcp.py`);
 导入用内容哈希做点 ID(重跑不重复)。等价性评测(`eval/rag/eval_mcp_retrieval.py`):通过 MCP 检索与直接调用逐题 top-10 **25/25 完全一致**,Recall@5 均为 92%。
 
+**知识库检索服务**(`kb_service/`,FastAPI):`/search` 与 SSE 版 `/search/stream`,API Key 鉴权、按 Key 令牌桶限流(加锁,并发测试 20 请求 / 限额 10 恰好 10 个 429)、
+Ollama 连不上 / 超时分别返回 503 / 504、请求日志不记查询和正文;只监听 127.0.0.1,只给本地模型调用。见 `kb_service/README.md`。
+
 进行中:用论文同款模型(Qwen3.5-35B-A3B,API)按论文设置复现 ToolMaze 数字(试跑 20 回合已完成:305 次调用,$0.43);
 LLM 裁判与人工标注一致性(Cohen's κ)。
 
