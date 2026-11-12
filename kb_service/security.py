@@ -43,6 +43,12 @@ class RateLimiter:
         self._buckets: dict[str, _Bucket] = {}
         self._lock = threading.Lock()
 
+    @property
+    def bucket_count(self) -> int:
+        """当前桶的个数(只应等于通过鉴权的 Key 数;无效 Key 不能建桶,否则可被刷爆内存)。"""
+        with self._lock:
+            return len(self._buckets)
+
     def try_acquire(self, key: str) -> float:
         """拿到一个令牌返回 0;拿不到返回还要等的秒数(> 0),不扣令牌。"""
         with self._lock:
